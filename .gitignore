@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+.npm/
+.next/
+out/
+coverage/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+secrets.*
+
+# Editors / operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local databases and vector stores
+*.db
+*.sqlite
+*.sqlite3
+chroma/
+
+# ML experiment artifacts
+mlruns/
+mlartifacts/
+wandb/
+*.model
+*.pt
+*.pth
+*.onnx
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+.cache/
