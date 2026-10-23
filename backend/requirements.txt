@@ -9,3 +9,6 @@ opentelemetry-api
 opentelemetry-sdk
 opentelemetry-instrumentation-fastapi
 opentelemetry-exporter-otlp
+openai
+anthropic
+pytest-asyncio
