@@ -6,6 +6,7 @@ import logging
 
 import httpx
 import redis.asyncio as redis
+from api.ingest import router as ingest_router
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from opentelemetry import trace
@@ -20,7 +21,6 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from config import settings
 from db.health import check_postgres
-from db.migrations import apply_migrations
 from db.pool import close_pool, open_pool
 
 
@@ -56,8 +56,6 @@ async def lifespan(app: FastAPI):
     await open_pool()
 
     try:
-        await apply_migrations()
-
         app.state.redis = redis.from_url(
             settings.redis_url,
             decode_responses=True,
@@ -84,6 +82,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.include_router(ingest_router)
 
 
 @app.get("/")

@@ -1,5 +1,7 @@
+
 fastapi
 uvicorn[standard]
+python-multipart
 asyncpg
 redis
 pydantic-settings
@@ -12,3 +14,16 @@ opentelemetry-exporter-otlp
 openai
 anthropic
 pytest-asyncio
+
+# Task 4: Multi-modal ingestion
+pypdfium2
+pdfplumber
+pytesseract
+python-docx
+pandas
+trafilatura
+arq
+tiktoken
+Pillow
+tabulate
+sentence-transformers

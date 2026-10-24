@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     content TEXT NOT NULL,
-    embedding vector(1536),
+    embedding vector(384),
     chunk_index INT NOT NULL CHECK (chunk_index >= 0),
     token_count INT NOT NULL CHECK (token_count >= 0),
     metadata JSONB NOT NULL DEFAULT '{}',

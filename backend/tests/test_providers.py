@@ -115,3 +115,82 @@ async def test_anthropic_embedding_is_explicitly_unsupported():
 
     with pytest.raises(NotImplementedError, match="does not provide"):
         await provider.embed(["hello"])
+
+
+@pytest.mark.asyncio
+async def test_openai_complete_forwards_multimodal_content():
+    image_content = [
+        {"type": "text", "text": "Describe this image."},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/jpeg;base64,dGVzdA=="
+            },
+        },
+    ]
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    return_value=SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                message=SimpleNamespace(content="A test image."),
+                                finish_reason="stop",
+                            )
+                        ],
+                        usage=SimpleNamespace(
+                            prompt_tokens=10,
+                            completion_tokens=5,
+                        ),
+                        model="gpt-4o",
+                    )
+                )
+            )
+        )
+    )
+
+    provider = OpenAIProvider(model="gpt-4o", client=client)
+    result = await provider.complete(
+        [ChatMessage(role="user", content=image_content)]
+    )
+
+    sent_messages = client.chat.completions.create.call_args.kwargs["messages"]
+    assert sent_messages[0]["content"] == image_content
+    assert result.content == "A test image."
+
+
+@pytest.mark.asyncio
+async def test_neuroflow_client_embed_empty(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+
+    from backend.providers.client import NeuroFlowClient
+
+    fake_redis = AsyncMock()
+    client = NeuroFlowClient(fake_redis)
+    result = await client.embed([])
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_neuroflow_client_embed_calls_local_encoder(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+
+    from backend.providers import client as client_module
+    from backend.providers.client import NeuroFlowClient
+
+    fake_vectors = [[0.1] * 384, [0.2] * 384]
+    monkeypatch.setattr(
+        client_module, "_encode_texts", lambda texts: fake_vectors
+    )
+
+    fake_redis = AsyncMock()
+    client = NeuroFlowClient(fake_redis)
+    result = await client.embed(["test sentence 1", "test sentence 2"])
+
+    assert len(result) == 2
+    assert len(result[0]) == 384
+    assert result == fake_vectors

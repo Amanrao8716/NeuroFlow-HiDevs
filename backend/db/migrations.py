@@ -10,7 +10,7 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
 async def apply_migrations() -> None:
-    """Apply schema and RLS SQL files if the schema is missing."""
+    """Apply schema, RLS, and subsequent numbered migrations."""
     pool = get_pool()
 
     async with pool.acquire() as conn:
@@ -18,9 +18,23 @@ async def apply_migrations() -> None:
             "SELECT to_regclass('public.documents') IS NOT NULL"
         )
 
-        if schema_exists:
-            # PostgreSQL initialization scripts may already have applied
-            # the schema and RLS policies.
+        if not schema_exists:
+            for filename in ("001_schema.sql", "002_rls.sql"):
+                migration_file = MIGRATIONS_DIR / filename
+
+                if not migration_file.is_file():
+                    raise FileNotFoundError(
+                        f"Migration file not found: {migration_file}"
+                    )
+
+                async with conn.transaction():
+                    await conn.execute(
+                        migration_file.read_text(encoding="utf-8")
+                    )
+
+            print("Database schema and RLS policies applied.")
+
+        else:
             rls_enabled = await conn.fetchval(
                 """
                 SELECT COALESCE(bool_and(relrowsecurity), FALSE)
@@ -37,40 +51,34 @@ async def apply_migrations() -> None:
                 """
             )
 
-            if rls_enabled:
-                print("Database schema and RLS policies already exist.")
-                return
+            if not rls_enabled:
+                rls_file = MIGRATIONS_DIR / "002_rls.sql"
 
-            rls_file = MIGRATIONS_DIR / "002_rls.sql"
+                if not rls_file.is_file():
+                    raise FileNotFoundError(
+                        f"RLS migration not found: {rls_file}"
+                    )
 
-            if not rls_file.is_file():
-                raise FileNotFoundError(
-                    f"RLS migration not found: {rls_file}"
-                )
+                async with conn.transaction():
+                    await conn.execute(
+                        rls_file.read_text(encoding="utf-8")
+                    )
+
+                print("RLS policies applied.")
+
+        # Apply numbered migrations after the initial schema.
+        # Existing databases can safely run migrations that are
+        # idempotent, such as 003_ingestion_status.sql.
+        for migration_file in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")):
+            if migration_file.name in (
+                "001_schema.sql",
+                "002_rls.sql",
+            ):
+                continue
 
             async with conn.transaction():
                 await conn.execute(
-                    rls_file.read_text(encoding="utf-8")
+                    migration_file.read_text(encoding="utf-8")
                 )
 
-            print("RLS policies applied.")
-            return
-
-        schema_file = MIGRATIONS_DIR / "001_schema.sql"
-        rls_file = MIGRATIONS_DIR / "002_rls.sql"
-
-        for migration_file in (schema_file, rls_file):
-            if not migration_file.is_file():
-                raise FileNotFoundError(
-                    f"Migration file not found: {migration_file}"
-                )
-
-        async with conn.transaction():
-            await conn.execute(
-                schema_file.read_text(encoding="utf-8")
-            )
-            await conn.execute(
-                rls_file.read_text(encoding="utf-8")
-            )
-
-        print("Database schema and RLS policies applied.")
+            print(f"Applied migration: {migration_file.name}")

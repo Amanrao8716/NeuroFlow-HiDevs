@@ -1,5 +1,7 @@
 
+import asyncio
 import time
+from threading import Lock
 
 from opentelemetry import trace
 
@@ -7,6 +9,30 @@ from .anthropic_provider import AnthropicProvider
 from .base import ChatMessage, GenerationResult
 from .openai_provider import OpenAIProvider
 from .router import ModelRouter, RoutingCriteria
+
+_LOCAL_EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_model_instance = None
+_model_lock = Lock()
+
+
+def _get_embedding_model():
+    global _model_instance
+    if _model_instance is None:
+        with _model_lock:
+            if _model_instance is None:
+                from sentence_transformers import SentenceTransformer
+
+                _model_instance = SentenceTransformer(_LOCAL_EMBEDDING_MODEL_NAME)
+    return _model_instance
+
+
+def _encode_texts(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+    model = _get_embedding_model()
+    embeddings = model.encode(texts, convert_to_numpy=True)
+    return embeddings.tolist()
+
 
 
 class NeuroFlowClient:
@@ -67,9 +93,20 @@ class NeuroFlowClient:
                 yield text
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        # Use the OpenAI embedding model for all embedding requests.
-        provider = self.providers["gpt-4o-mini"]
-        return await provider.embed(texts)
+        """Generate 384-dimensional embeddings using local SentenceTransformer."""
+        if not texts:
+            return []
+
+        start = time.perf_counter()
+        with self.tracer.start_as_current_span("embedding.local") as span:
+            span.set_attribute("embedding.model", _LOCAL_EMBEDDING_MODEL_NAME)
+            span.set_attribute("embedding.count", len(texts))
+
+            embeddings = await asyncio.to_thread(_encode_texts, texts)
+
+            latency_ms = (time.perf_counter() - start) * 1000
+            span.set_attribute("embedding.latency_ms", latency_ms)
+            return embeddings
 
     async def _record_metrics(
         self,
