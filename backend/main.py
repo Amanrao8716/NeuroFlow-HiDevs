@@ -7,6 +7,7 @@ import logging
 import httpx
 import redis.asyncio as redis
 from api.ingest import router as ingest_router
+from api.retrieve import router as retrieve_router
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from opentelemetry import trace
@@ -83,6 +84,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(ingest_router)
+app.include_router(retrieve_router)
 
 
 @app.get("/")

@@ -38,6 +38,10 @@ CREATE INDEX IF NOT EXISTS chunks_document_id_idx
 CREATE INDEX IF NOT EXISTS chunks_content_fts_idx
     ON chunks USING gin (to_tsvector('english', content));
 
+CREATE INDEX IF NOT EXISTS chunks_metadata_gin_idx
+    ON chunks USING gin (metadata jsonb_path_ops);
+
+
 CREATE TABLE IF NOT EXISTS pipelines (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT UNIQUE NOT NULL,
