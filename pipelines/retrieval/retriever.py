@@ -9,7 +9,11 @@ import logging
 from typing import Any, Callable
 from uuid import UUID
 
-from db.pool import get_pool, pipeline_connection
+try:
+    from db.pool import get_pool, pipeline_connection
+except ImportError:
+    get_pool = None
+    pipeline_connection = None
 from pipelines.retrieval.query_processor import ProcessedQuery, QueryProcessor
 
 logger = logging.getLogger("neuroflow.retrieval.retriever")

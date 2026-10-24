@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     model_used TEXT,
     status VARCHAR(20) NOT NULL DEFAULT 'running'
         CHECK (status IN ('running', 'completed', 'failed')),
+    prompt TEXT,
+    citations JSONB,
+    error_message TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

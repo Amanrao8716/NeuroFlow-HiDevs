@@ -34,7 +34,18 @@ class ModelRouter:
             if isinstance(raw_config, bytes):
                 raw_config = raw_config.decode()
 
-            config = json.loads(raw_config)
+            try:
+                config = json.loads(raw_config)
+            except Exception:
+                # Fallback in case raw_config had unquoted keys like {name:gpt-4o}
+                import re
+                fixed = re.sub(r'([{,])\s*([a-zA-Z0-9_]+)\s*:', r'\1"\2":', raw_config)
+                # quote unquoted string values that aren't true/false/null/numbers
+                fixed = re.sub(r':\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*([,}])', lambda m: f':"{m.group(1)}"{m.group(2)}' if m.group(1) not in ('true', 'false', 'null') else m.group(0), fixed)
+                try:
+                    config = json.loads(fixed)
+                except Exception:
+                    config = {"name": name}
             config.setdefault("name", name)
             models.append(config)
 

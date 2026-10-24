@@ -27,3 +27,4 @@ tiktoken
 Pillow
 tabulate
 sentence-transformers
+sse-starlette>=2.0.0

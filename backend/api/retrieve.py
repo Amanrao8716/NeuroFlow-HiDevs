@@ -68,7 +68,6 @@ class RetrieveResponse(BaseModel):
 
 
 @router.post("/retrieve", response_model=RetrieveResponse)
-@router.post("/query", response_model=RetrieveResponse)
 async def retrieve_endpoint(request: RetrieveRequest):
     """Execute hybrid retrieval, reciprocal rank fusion, optional reranking, and context assembly."""
     try:

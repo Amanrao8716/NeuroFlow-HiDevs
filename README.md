@@ -49,4 +49,56 @@ This is an architecture-first repository. No production services or credentials 
 
 ## Status
 
-Task 31: architecture and API contracts. Subsequent tasks implement and validate the system incrementally.
+- Task 31: Architecture and API contracts.
+- Task 03: Multi-provider LLM support and router.
+- Task 04: Multimodal document ingestion.
+- Task 05: Hybrid retrieval pipeline with RRF fusion and cross-encoder reranking.
+- Task 06: RAG generation pipeline, progressive streaming SSE, and citation tracking.
+
+## Task 6 — RAG Generation Pipeline & Streaming SSE
+
+### Features
+- **Dynamic Prompt Assembly:** Conditioned on classified query type (`factual`, `analytical`, `comparative`, `procedural`).
+- **Grounded LLM Generation:** Strictly context-grounded prompt format (`<context>[Source N — doc.pdf, page M]\n...\n</context>`).
+- **Pre-Invocation Pipeline Run Creation:** Run record is persisted in `pipeline_runs` with status `running` *before* the LLM call.
+- **Progressive Streaming SSE:** `POST /query` registers stream and returns `{run_id, stream_url}`. `GET /query/{run_id}/stream` streams events: `retrieval_start`, `retrieval_complete`, progressive `token`, and `done` (with structured citations).
+- **Keepalive Heartbeats:** 15-second SSE comment pings prevent proxy connection timeouts.
+- **Citation Extraction & Validation:** Parses `[Source N]` references, resolves them to context chunks, deduplicates preserving order of appearance, and flags out-of-bounds references (e.g. `[Source 99]`) as invalid citations.
+- **Asynchronous Evaluation Enqueueing:** Non-blocking job enqueueing to Redis/arq queue `neuroflow:queue:evaluations` after generation persistence.
+
+### Quick Start & API Usage
+
+#### 1. Synchronous Generation (`stream=false`)
+```bash
+curl -X POST "http://localhost:8000/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is pgvector?",
+    "pipeline_id": "<PIPELINE_UUID>",
+    "stream": false
+  }'
+```
+
+#### 2. Streaming Generation via SSE (`stream=true`)
+```bash
+# Step 1: Initialize generation run
+curl -X POST "http://localhost:8000/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is pgvector?",
+    "pipeline_id": "<PIPELINE_UUID>",
+    "stream": true
+  }'
+
+# Response: {"run_id": "<RUN_UUID>", "stream_url": "/query/<RUN_UUID>/stream", "status": "running"}
+
+# Step 2: Stream progressive tokens and citation metadata
+curl.exe -N "http://localhost:8000/query/<RUN_UUID>/stream"
+```
+
+### Running Tests
+Inside the Docker container:
+```bash
+docker compose --env-file .env -f infra/docker-compose.yml exec api python -m pytest tests/ -v
+```
+All 42 tests pass across provider routing, ingestion, hybrid retrieval, prompt assembly, citation tracking, and streaming API.
