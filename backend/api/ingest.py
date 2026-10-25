@@ -14,6 +14,8 @@ from db.pool import pipeline_connection
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, HttpUrl
 
+from resilience.backpressure import BackpressureGuard, QueueStatus
+
 router = APIRouter(tags=["ingestion"])
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,26 @@ async def ingest_file(
 
         document_id = document["id"]
 
+    # ── Backpressure check (before enqueueing) ───────────────────────
+    redis_client = getattr(request.app.state, "redis", None)
+    if redis_client is not None:
+        bp = BackpressureGuard(redis_client)
+        bp_result = await bp.check()
+        if bp_result.should_reject:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "ingestion_queue_full",
+                    "queue_depth": bp_result.queue_depth,
+                    "retry_after": bp_result.retry_after,
+                    "document_id": str(document_id),
+                    "status": "rejected",
+                },
+            )
+    else:
+        bp_result = None
+
     try:
         await _enqueue(request, document_id, pipeline_id)
 
@@ -167,11 +189,15 @@ async def ingest_file(
             detail="Could not queue document for processing.",
         ) from exc
 
-    return {
+    response_body: dict = {
         "document_id": str(document_id),
         "status": "queued",
         "duplicate": False,
     }
+    if bp_result is not None and bp_result.status == QueueStatus.WARNING:
+        response_body["warning"] = bp_result.warning
+        response_body["estimated_wait_minutes"] = bp_result.estimated_wait_minutes
+    return response_body
 
 
 @router.post("/ingest/url", status_code=202)
@@ -222,6 +248,26 @@ async def ingest_url(
 
         document_id = document["id"]
 
+    # ── Backpressure check (before enqueueing) ───────────────────────
+    redis_client = getattr(request.app.state, "redis", None)
+    if redis_client is not None:
+        bp = BackpressureGuard(redis_client)
+        bp_result = await bp.check()
+        if bp_result.should_reject:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "ingestion_queue_full",
+                    "queue_depth": bp_result.queue_depth,
+                    "retry_after": bp_result.retry_after,
+                    "document_id": str(document_id),
+                    "status": "rejected",
+                },
+            )
+    else:
+        bp_result = None
+
     try:
         await _enqueue(request, document_id, payload.pipeline_id)
 
@@ -250,11 +296,15 @@ async def ingest_url(
             detail="Could not queue URL for processing.",
         ) from exc
 
-    return {
+    response_body: dict = {
         "document_id": str(document_id),
         "status": "queued",
         "duplicate": False,
     }
+    if bp_result is not None and bp_result.status == QueueStatus.WARNING:
+        response_body["warning"] = bp_result.warning
+        response_body["estimated_wait_minutes"] = bp_result.estimated_wait_minutes
+    return response_body
 
 
 @router.get("/documents/{document_id}")

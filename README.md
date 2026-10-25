@@ -315,3 +315,65 @@ curl.exe "http://localhost:8000/finetune/jobs"
 # 4. Get fine-tuning job details, metrics, and MLflow run URL
 curl.exe "http://localhost:8000/finetune/jobs/<JOB_ID>"
 ```
+
+## Task 10 — Resilience Engineering
+
+### Overview
+
+The `backend/resilience/` package provides a production-quality fault-tolerance layer:
+
+| Component | File | Purpose |
+|---|---|---|
+| Circuit Breaker | `circuit_breaker.py` | Prevents cascade failures on external LLM providers |
+| Token-Bucket Rate Limiter | `rate_limiter.py` | Redis-backed, cross-worker provider rate coordination |
+| Endpoint Rate Limiter | `endpoint_rate_limiter.py` | Sliding-window per-IP limits on `/ingest` and `/query` |
+| Backpressure Guard | `backpressure.py` | Queue-depth-aware ingestion control (503 / 202 + warning) |
+| Timeout Manager | `timeout_manager.py` | Bounded async operations with adaptive p95 latency tracking |
+
+### Redis Key Schema
+
+| Key Pattern | Owner | Purpose |
+|---|---|---|
+| `circuit:{name}:state` | CircuitBreaker | `closed`, `open`, or `half_open` |
+| `circuit:{name}:failure_count` | CircuitBreaker | Consecutive failure counter |
+| `circuit:{name}:opened_at` | CircuitBreaker | UNIX timestamp when circuit opened |
+| `rpb:{provider}:tokens` | RateLimiter | Current token count |
+| `rpb:{provider}:last_refill` | RateLimiter | Timestamp of last refill |
+| `rpb:pipeline:{id}:tokens` | RateLimiter | Per-pipeline token bucket |
+| `ratelimit:{route}:{ip}` | EndpointRateLimiter | Sliding-window sorted set |
+| `latency:{task_type}` | TimeoutManager | Sorted set of latency observations |
+| `timeouts:{task_type}` | TimeoutManager | Counter of timed-out operations |
+| `queue:ingest` | BackpressureGuard | ARQ ingestion queue (read via `LLEN`) |
+
+### Configuration
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-For` for IP extraction |
+
+Rate limits (code constants, adjustable):
+- `/ingest`: 10 requests/hour per IP
+- `/query`: 60 requests/minute per IP
+- OpenAI global: 3,000 requests capacity, 50 tokens/second refill
+- Per-pipeline: `rate_limit_rpm` (default 60)
+
+### Health Endpoint
+
+`GET /health` returns:
+```json
+{
+  "status": "ok | degraded | critical",
+  "checks": {
+    "postgres": {"status": "healthy", "latency_ms": 2},
+    "redis": {"status": "healthy", "latency_ms": 1},
+    "mlflow": {"status": "healthy", "latency_ms": 50},
+    "circuit_breakers": [{"name": "openai", "state": "closed", "failure_count": 0}],
+    "ingest_queue_depth": 12
+  }
+}
+```
+
+Status rules:
+- **critical** — PostgreSQL or Redis unreachable
+- **degraded** — any circuit breaker OPEN, or MLflow unreachable
+- **ok** — all checks healthy

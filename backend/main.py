@@ -3,6 +3,7 @@
 
 from contextlib import asynccontextmanager
 import logging
+import time
 
 import httpx
 import redis.asyncio as redis
@@ -28,6 +29,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from config import settings
 from db.health import check_postgres
 from db.pool import close_pool, open_pool
+from resilience.circuit_breaker import CircuitBreakerRegistry
+from resilience.endpoint_rate_limiter import RateLimitMiddleware
+from resilience.backpressure import INGEST_QUEUE_KEY
+from resilience.timeout_manager import TimeoutManager
 
 
 logging.basicConfig(level=logging.INFO)
@@ -71,6 +76,14 @@ async def lifespan(app: FastAPI):
         await app.state.redis.ping()
         logger.info("Redis connection established.")
 
+        # Initialize resilience components
+        app.state.circuit_breakers = CircuitBreakerRegistry(app.state.redis)
+        app.state.timeout_manager = TimeoutManager(app.state.redis)
+        logger.info("Resilience layer initialized.")
+
+        # Whether to trust X-Forwarded-For headers (set via environment or config)
+        app.state.trust_proxy = getattr(settings, "trust_proxy", False)
+
         yield
 
     finally:
@@ -88,6 +101,11 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Add sliding-window rate-limiting middleware
+# (Redis is not available at module level; the middleware handles None redis gracefully)
+app.add_middleware(RateLimitMiddleware)
+
 app.include_router(ingest_router)
 app.include_router(retrieve_router)
 app.include_router(query_router)
@@ -108,44 +126,123 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Check PostgreSQL, Redis, and MLflow connectivity."""
-    checks = {}
+    """
+    Resilience-aware health check.
 
-    checks["postgres"] = await check_postgres()
+    Returns:
+        status: "ok" | "degraded" | "critical"
+        checks: per-component result dict
 
+    Status rules:
+        critical  – PostgreSQL or Redis unreachable
+        degraded  – any circuit breaker OPEN, or MLflow/optional dep unhealthy
+        ok        – all required components healthy
+    """
+    checks: dict = {}
+    critical = False
+    degraded = False
+
+    # ── PostgreSQL ─────────────────────────────────────────────────────
+    t0 = time.perf_counter()
     try:
-        await app.state.redis.ping()
-        checks["redis"] = {"status": "healthy"}
-    except Exception:
-        logger.exception("Redis health check failed.")
-        checks["redis"] = {"status": "unhealthy"}
+        pg_result = await check_postgres()
+        pg_latency_ms = round((time.perf_counter() - t0) * 1000)
+        pg_result["latency_ms"] = pg_latency_ms
+    except Exception as exc:
+        pg_result = {"status": "unhealthy", "error": str(exc)}
+        pg_latency_ms = round((time.perf_counter() - t0) * 1000)
+        pg_result["latency_ms"] = pg_latency_ms
 
+    checks["postgres"] = pg_result
+    if pg_result.get("status") != "healthy":
+        critical = True
+
+    # ── Redis ──────────────────────────────────────────────────────────
+    redis_client = getattr(app.state, "redis", None)
+    t0 = time.perf_counter()
+    try:
+        if redis_client:
+            await redis_client.ping()
+            redis_latency_ms = round((time.perf_counter() - t0) * 1000)
+            checks["redis"] = {"status": "healthy", "latency_ms": redis_latency_ms}
+        else:
+            checks["redis"] = {"status": "unhealthy", "error": "Not initialized"}
+            critical = True
+    except Exception as exc:
+        redis_latency_ms = round((time.perf_counter() - t0) * 1000)
+        logger.exception("Redis health check failed.")
+        checks["redis"] = {
+            "status": "unhealthy",
+            "latency_ms": redis_latency_ms,
+        }
+        critical = True
+
+    # ── MLflow (optional) ──────────────────────────────────────────────
+    t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             response = await client.get(
                 f"{settings.mlflow_tracking_uri.rstrip('/')}/health"
             )
-
+        mlflow_latency_ms = round((time.perf_counter() - t0) * 1000)
         checks["mlflow"] = {
             "status": (
                 "healthy"
                 if response.status_code == 200
                 else "unhealthy"
-            )
+            ),
+            "latency_ms": mlflow_latency_ms,
         }
+        if checks["mlflow"]["status"] != "healthy":
+            degraded = True
     except httpx.HTTPError:
+        mlflow_latency_ms = round((time.perf_counter() - t0) * 1000)
         logger.exception("MLflow health check failed.")
-        checks["mlflow"] = {"status": "unhealthy"}
+        checks["mlflow"] = {
+            "status": "unhealthy",
+            "latency_ms": mlflow_latency_ms,
+        }
+        degraded = True
 
-    healthy = all(
-        result["status"] == "healthy"
-        for result in checks.values()
-    )
+    # ── Circuit Breakers ───────────────────────────────────────────────
+    cb_registry = getattr(app.state, "circuit_breakers", None)
+    circuit_info: list[dict] = []
+    if cb_registry:
+        for name, cb in cb_registry.all().items():
+            try:
+                info = await cb.get_info()
+                circuit_info.append(info)
+                if info.get("state") == "open":
+                    degraded = True
+            except Exception as exc:
+                circuit_info.append({"name": name, "error": str(exc)})
+    checks["circuit_breakers"] = circuit_info
+
+    # ── Ingestion queue depth ──────────────────────────────────────────
+    try:
+        if redis_client:
+            depth = await redis_client.llen(INGEST_QUEUE_KEY)
+            checks["ingest_queue_depth"] = int(depth or 0)
+        else:
+            checks["ingest_queue_depth"] = None
+    except Exception:
+        checks["ingest_queue_depth"] = None
+
+    # ── Overall status ─────────────────────────────────────────────────
+    if critical:
+        overall = "critical"
+        http_status = 503
+    elif degraded:
+        overall = "degraded"
+        http_status = 503
+    else:
+        overall = "ok"
+        http_status = 200
 
     return JSONResponse(
-        status_code=200 if healthy else 503,
+        status_code=http_status,
         content={
-            "status": "healthy" if healthy else "degraded",
+            "status": overall,
             "checks": checks,
         },
     )
