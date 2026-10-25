@@ -101,7 +101,7 @@ Inside the Docker container:
 ```bash
 docker compose --env-file .env -f infra/docker-compose.yml exec api python -m pytest tests/ -v
 ```
-All 89 tests pass across provider routing, ingestion, hybrid retrieval, prompt assembly, citation tracking, streaming API, RAGAS metrics, judge evaluation, human calibration, Pearson correlation runner, pipeline configuration schema, versioning, analytics, optimizer, and A/B comparison.
+All 104 tests pass across provider routing, ingestion, hybrid retrieval, prompt assembly, citation tracking, streaming API, RAGAS metrics, judge evaluation, human calibration, Pearson correlation runner, pipeline configuration schema, versioning, analytics, optimizer, A/B comparison, and fine-tuning extraction/tracking.
 
 ---
 
@@ -242,3 +242,76 @@ curl.exe -X POST "http://localhost:8000/pipelines/compare" \
   }'
 ```
 Returns side-by-side generated outputs, retrieval latencies, total latencies, token usages, estimated costs, citations, and evaluation metric differentials.
+
+---
+
+## Task 9 — Fine-Tuning Pipeline: Training Data Extraction, MLflow Tracking & Model Registration
+
+NeuroFlow provides an end-to-end automated fine-tuning pipeline for RAG models, including strict data quality filtering, PII sanitization, MLflow run and artifact tracking, asynchronous provider job management, ARQ background polling, model registry integration, and DPO preference formatting.
+
+### 1. Training Data Extraction & Validation (`pipelines/finetuning/extractor.py`)
+Eligible pairs from `training_pairs` and `pipeline_runs` must satisfy all criteria:
+- **Quality Score**: `quality_score >= 0.82`.
+- **Not Previously Consumed**: `included_in_job IS NULL`.
+- **Human Rating**: `user_rating >= 4` or `user_rating IS NULL` (excluding rejected ratings $\le 2$).
+- **Groundedness**: Requires faithfulness $> 0.80$. Missing faithfulness records are re-evaluated using the judge evaluator (`FaithfulnessMetric`), rejecting candidates if the re-evaluated score is $\le 0.80$.
+- **Length Boundaries**: Assistant responses must be strictly 50–2000 tokens (calculated using `tiktoken` with `cl100k_base` encoding).
+- **Citation Compliance**: Requires at least one citation matching `[Source N]` where $N \ge 1$.
+- **PII Protection**: Rejects queries containing email addresses or telephone numbers using regular expressions without logging sensitive data.
+- **SFT JSONL Format**: Serialized into OpenAI-compatible conversational JSONL:
+  ```json
+  {"messages":[{"role":"system","content":"..."},{"role":"user","content":"[Context]\n...\n\n[Question]\n..."},{"role":"assistant","content":"..."}]}
+  ```
+- **Atomicity**: Training pairs are marked with `included_in_job = job_id` inside a database transaction only after successful file generation and provider submission.
+
+### 2. MLflow Experiment Tracking (`pipelines/finetuning/tracker.py`)
+- Each training job creates an MLflow run named `finetune-{job_id}` in the configured tracking server (`MLFLOW_TRACKING_URI`).
+- Logs parameters: `base_model`, `accepted_training_pair_count`, `average_quality_score`, `training_data_date_range`.
+- Logs the generated JSONL dataset as an artifact under `training_data/`.
+- On completion, logs terminal metrics: `training_loss`, `validation_loss`, `trained_tokens`.
+- Exposes the MLflow run ID and direct dashboard URL (`/#/experiments/{exp_id}/runs/{run_id}`) via the API.
+- Cloud API Note: For remote provider fine-tuning (e.g. OpenAI), weights are hosted remotely by the provider; the provider fine-tuned model identifier is recorded and registered in the NeuroFlow model registry.
+
+### 3. Job Manager & ARQ Polling (`pipelines/finetuning/job_manager.py` & `worker/tasks.py`)
+- **Submission Workflow**:
+  1. Creates pending database record in `finetune_jobs`.
+  2. Extracts and validates dataset (enforcing provider minimum of 10 samples).
+  3. Logs dataset artifact and parameters to MLflow.
+  4. Uploads dataset file to OpenAI with `purpose="fine-tune"`.
+  5. Submits fine-tuning job with base model (e.g., `gpt-4o-mini`).
+  6. Associates pairs with job ID in database transaction.
+  7. Enqueues background status polling via ARQ deferred by 60 seconds.
+- **ARQ Background Polling (`poll_finetune_job`)**:
+  - Polls provider job status every 60 seconds.
+  - On `succeeded`: records `fine_tuned_model` identifier and tokens, updates MLflow run with metrics, and registers the model in Redis (`router:models`) with `"fine_tuned": true` and `task_type="rag_qa"`.
+  - Idempotent: ensures completed jobs are not re-registered.
+  - On `failed` or `cancelled`: records error details and terminates MLflow run safely.
+
+### 4. Direct Preference Optimization (DPO) Support
+When both a positive response (`rating >= 4`) and a negative response (`rating <= 2`) exist for the same query, preference pairs are created:
+```json
+{"prompt": "...", "chosen": "...", "rejected": "..."}
+```
+Excludes PII queries, ensures no duplicate prompts, and outputs to `training_data/{job_id}_dpo.jsonl` compatible with Hugging Face TRL.
+
+### 5. REST API Endpoints
+
+```bash
+# 1. Preview eligible training pairs without modifying state
+curl.exe "http://localhost:8000/finetune/training-data/preview?limit=5"
+
+# 2. Trigger fine-tuning job submission
+curl.exe -X POST "http://localhost:8000/finetune/jobs" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base_model": "gpt-4o-mini",
+    "min_quality_score": 0.82,
+    "format": "sft"
+  }'
+
+# 3. List fine-tuning jobs
+curl.exe "http://localhost:8000/finetune/jobs"
+
+# 4. Get fine-tuning job details, metrics, and MLflow run URL
+curl.exe "http://localhost:8000/finetune/jobs/<JOB_ID>"
+```

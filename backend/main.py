@@ -8,6 +8,7 @@ import httpx
 import redis.asyncio as redis
 from api.compare import router as compare_router
 from api.evaluations import router as evaluations_router
+from api.finetune import router as finetune_router
 from api.ingest import router as ingest_router
 from api.pipelines import router as pipelines_router
 from api.query import router as query_router
@@ -93,6 +94,7 @@ app.include_router(query_router)
 app.include_router(evaluations_router)
 app.include_router(pipelines_router)
 app.include_router(compare_router)
+app.include_router(finetune_router)
 
 
 @app.get("/")

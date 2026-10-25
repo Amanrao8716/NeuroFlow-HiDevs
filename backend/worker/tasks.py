@@ -4,17 +4,19 @@
 import json
 import logging
 import time
+from typing import Any
 from uuid import UUID
 
 from opentelemetry import trace
 
-from db.pool import pipeline_connection
+from db.pool import connection, pipeline_connection
 from pipelines.ingestion.csv_extractor import extract_csv
 from pipelines.ingestion.docx_extractor import extract_docx
 from pipelines.ingestion.image_extractor import extract_image
 from pipelines.ingestion.pdf_extractor import extract_pdf
 from pipelines.ingestion.url_extractor import extract_url
 from pipelines.ingestion.chunker import chunk_pages
+from pipelines.finetuning.tracker import MLflowTracker
 from providers.client import NeuroFlowClient
 
 logger = logging.getLogger("neuroflow.ingestion")
@@ -225,3 +227,169 @@ async def evaluate_pipeline_run(ctx, run_id: str, pipeline_id: str):
         except Exception as exc:
             logger.exception("Evaluation failed for run %s: %s", run_id, exc)
             raise
+
+
+async def poll_finetune_job(ctx, job_id: str, openai_client: Any = None):
+    """Poll asynchronous provider fine-tuning job status and handle terminal states."""
+    import os
+    from openai import AsyncOpenAI
+
+    jid = UUID(job_id)
+    redis = ctx.get("redis")
+
+    with tracer.start_as_current_span("finetune.poll") as span:
+        span.set_attribute("job_id", job_id)
+
+        # 1. Fetch job record
+        async with connection() as conn:
+            job_row = await conn.fetchrow(
+                """
+                SELECT id, provider_job_id, status, mlflow_run_id, fine_tuned_model, base_model
+                FROM finetune_jobs
+                WHERE id = $1
+                """,
+                jid,
+            )
+
+        if not job_row:
+            logger.warning("Finetune job %s not found in DB.", job_id)
+            return {"status": "not_found"}
+
+        current_status = job_row["status"]
+        if current_status in ("succeeded", "failed", "cancelled"):
+            logger.info("Job %s is already in terminal state %s.", job_id, current_status)
+            return {"status": current_status}
+
+        provider_job_id = job_row["provider_job_id"]
+        if not provider_job_id:
+            logger.warning("Job %s has no provider_job_id.", job_id)
+            return {"status": current_status}
+
+        client = openai_client or AsyncOpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            base_url=os.getenv("OPENAI_BASE_URL") or None,
+        )
+
+        try:
+            remote_job = await client.fine_tuning.jobs.retrieve(provider_job_id)
+        except Exception as exc:
+            logger.warning("Transient error polling provider job %s: %s", provider_job_id, exc)
+            from arq.connections import create_pool, RedisSettings
+            from config import settings
+            pool = await create_pool(RedisSettings(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                password=settings.redis_password,
+                database=0,
+            ))
+            try:
+                await pool.enqueue_job("poll_finetune_job", job_id, _defer_by=60)
+            finally:
+                await pool.aclose()
+            return {"status": "retry_deferred", "error": str(exc)}
+
+        remote_status = getattr(remote_job, "status", "running")
+        logger.info("Polled job %s -> remote status: %s", job_id, remote_status)
+
+        if remote_status == "succeeded":
+            ft_model = getattr(remote_job, "fine_tuned_model", None) or f"ft:{job_row['base_model']}:{job_id}"
+            trained_tokens = getattr(remote_job, "trained_tokens", None)
+            metrics = {}
+            if hasattr(remote_job, "training_metrics"):
+                metrics = dict(getattr(remote_job, "training_metrics") or {})
+
+            # 1. Update DB
+            async with connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE finetune_jobs
+                    SET status = 'succeeded',
+                        fine_tuned_model = $1,
+                        trained_tokens = $2,
+                        metrics = $3::jsonb,
+                        completed_at = NOW()
+                    WHERE id = $4
+                    """,
+                    ft_model,
+                    trained_tokens,
+                    json.dumps(metrics),
+                    jid,
+                )
+
+            # 2. Log metrics to MLflow
+            mlflow_id = job_row["mlflow_run_id"]
+            if mlflow_id:
+                try:
+                    tracker = MLflowTracker()
+                    tracker.log_completion_metrics(
+                        run_id=mlflow_id,
+                        metrics=metrics,
+                        trained_tokens=trained_tokens,
+                        status="FINISHED",
+                    )
+                except Exception as mf_err:
+                    logger.warning("Failed to log MLflow completion for job %s: %s", job_id, mf_err)
+
+            # 3. Register model in Redis ModelRouter registry (avoid duplicate registration)
+            if redis:
+                existing_entry = await redis.hget("router:models", ft_model)
+                if not existing_entry:
+                    model_entry = {
+                        "name": ft_model,
+                        "role": "general",
+                        "task_type": "rag_qa",
+                        "fine_tuned": True,
+                        "context_window": 128000,
+                        "estimated_cost_per_call": 0.002,
+                    }
+                    await redis.hset("router:models", ft_model, json.dumps(model_entry))
+                    logger.info("Registered fine-tuned model %s in router:models", ft_model)
+
+            return {"status": "succeeded", "fine_tuned_model": ft_model}
+
+        elif remote_status in ("failed", "cancelled"):
+            err_obj = getattr(remote_job, "error", None)
+            err_msg = str(getattr(err_obj, "message", err_obj) or f"Fine-tuning job {remote_status}")[:500]
+
+            async with connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE finetune_jobs
+                    SET status = $1,
+                        error_message = $2,
+                        completed_at = NOW()
+                    WHERE id = $3
+                    """,
+                    remote_status,
+                    err_msg,
+                    jid,
+                )
+
+            mlflow_id = job_row["mlflow_run_id"]
+            if mlflow_id:
+                try:
+                    tracker = MLflowTracker()
+                    tracker.log_completion_metrics(
+                        run_id=mlflow_id,
+                        status="FAILED" if remote_status == "failed" else "KILLED",
+                    )
+                except Exception:
+                    pass
+
+            return {"status": remote_status, "error": err_msg}
+
+        else:
+            from arq.connections import create_pool, RedisSettings
+            from config import settings
+            pool = await create_pool(RedisSettings(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                password=settings.redis_password,
+                database=0,
+            ))
+            try:
+                await pool.enqueue_job("poll_finetune_job", job_id, _defer_by=60)
+            finally:
+                await pool.aclose()
+
+            return {"status": remote_status}

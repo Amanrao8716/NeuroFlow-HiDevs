@@ -4,13 +4,19 @@
 from arq.connections import RedisSettings
 
 from config import settings
-from worker.tasks import evaluate_pipeline_run, process_document, shutdown, startup
+from worker.tasks import (
+    evaluate_pipeline_run,
+    poll_finetune_job,
+    process_document,
+    shutdown,
+    startup,
+)
 
 
 class WorkerSettings:
-    """Configure background document processing and pipeline evaluation."""
+    """Configure background document processing, pipeline evaluation, and fine-tuning polling."""
 
-    functions = [process_document, evaluate_pipeline_run]
+    functions = [process_document, evaluate_pipeline_run, poll_finetune_job]
     on_startup = startup
     on_shutdown = shutdown
 
