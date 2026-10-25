@@ -104,6 +104,7 @@ class EvaluationJudge:
         pipeline_id: UUID | str,
         prompt: str = "",
         system_prompt: str | None = None,
+        training_threshold: float = 0.8,
     ) -> EvaluationReport:
         """Run all 4 metrics concurrently with asyncio.gather, compute score, and persist."""
         r_id = UUID(str(run_id))
@@ -132,7 +133,7 @@ class EvaluationJudge:
             + w["context_recall"] * rec_res.score
         )
         overall_score = round(max(0.0, min(1.0, overall_raw)), 4)
-        is_training_candidate = overall_score > 0.8
+        is_training_candidate = overall_score > training_threshold
 
         report = EvaluationReport(
             eval_id=str(eval_id),
@@ -199,9 +200,12 @@ class EvaluationJudge:
         async with pipeline_connection(p_id) as conn:
             row = await conn.fetchrow(
                 """
-                SELECT id, query, prompt, generation, retrieved_chunk_ids
-                FROM pipeline_runs
-                WHERE id = $1 AND pipeline_id = $2
+                SELECT pr.id, pr.query, pr.prompt, pr.generation, pr.retrieved_chunk_ids,
+                       COALESCE(pv.config, p.config) AS config
+                FROM pipeline_runs pr
+                LEFT JOIN pipelines p ON p.id = pr.pipeline_id
+                LEFT JOIN pipeline_versions pv ON pv.pipeline_id = pr.pipeline_id AND pv.version = pr.pipeline_version
+                WHERE pr.id = $1 AND pr.pipeline_id = $2
                 """,
                 r_id,
                 p_id,
@@ -213,6 +217,25 @@ class EvaluationJudge:
             prompt = row["prompt"] or ""
             answer = row["generation"] or ""
             chunk_ids = row["retrieved_chunk_ids"] or []
+
+            config_data = row["config"]
+            if isinstance(config_data, str):
+                import json
+                try:
+                    config_data = json.loads(config_data)
+                except Exception:
+                    config_data = {}
+            elif not isinstance(config_data, dict):
+                config_data = {}
+
+            training_threshold = 0.8
+            if "evaluation" in config_data and isinstance(config_data["evaluation"], dict):
+                threshold = config_data["evaluation"].get("training_threshold")
+                if threshold is not None:
+                    try:
+                        training_threshold = float(threshold)
+                    except (ValueError, TypeError):
+                        pass
 
             context = ""
             if chunk_ids:
@@ -234,6 +257,7 @@ class EvaluationJudge:
             run_id=r_id,
             pipeline_id=p_id,
             prompt=prompt,
+            training_threshold=training_threshold,
         )
 
     async def _persist_evaluation(

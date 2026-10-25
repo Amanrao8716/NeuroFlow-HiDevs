@@ -47,6 +47,9 @@ class GenerationResult:
     model_used: str
     status: str
     error_message: str | None = None
+    pipeline_version: int | None = None
+    retrieval_latency_ms: int | None = None
+    cost_usd: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +66,9 @@ class GenerationResult:
             "model_used": self.model_used,
             "status": self.status,
             "error_message": self.error_message,
+            "pipeline_version": self.pipeline_version,
+            "retrieval_latency_ms": self.retrieval_latency_ms,
+            "cost_usd": self.cost_usd,
         }
 
 
@@ -94,6 +100,43 @@ class GenerationPipeline:
         self.token_counter = token_counter or TokenCounter()
         self.client = llm_client or (NeuroFlowClient(redis_client) if redis_client else None)
 
+    async def _load_pipeline_config(
+        self,
+        pipeline_id: UUID,
+        version: int | None = None,
+    ) -> tuple[int, dict[str, Any] | None]:
+        """Load pipeline configuration for a specific version or latest active version."""
+        if pipeline_connection is None:
+            return (1, None)
+        try:
+            async with pipeline_connection(pipeline_id) as conn:
+                if version is not None:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT version, config
+                        FROM pipeline_versions
+                        WHERE pipeline_id = $1 AND version = $2
+                        """,
+                        pipeline_id,
+                        version,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT version, config
+                        FROM pipelines
+                        WHERE id = $1
+                        """,
+                        pipeline_id,
+                    )
+                if row:
+                    raw_cfg = row["config"]
+                    cfg_dict = json.loads(raw_cfg) if isinstance(raw_cfg, str) else dict(raw_cfg)
+                    return (row["version"], cfg_dict)
+        except Exception as exc:
+            logger.debug("Could not load config for pipeline %s: %s", pipeline_id, exc)
+        return (1, None)
+
     async def _create_pipeline_run(
         self,
         run_id: UUID,
@@ -101,6 +144,9 @@ class GenerationPipeline:
         query: str,
         retrieved_chunk_ids: list[UUID],
         prompt: str,
+        pipeline_version: int | None = None,
+        retrieval_latency_ms: int | None = None,
+        execution_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Persist a new pipeline_runs record BEFORE the LLM call with status='running'."""
         try:
@@ -108,20 +154,27 @@ class GenerationPipeline:
                 await conn.execute(
                     """
                     INSERT INTO pipeline_runs (
-                        id, pipeline_id, query, retrieved_chunk_ids, prompt, status
+                        id, pipeline_id, pipeline_version, query, retrieved_chunk_ids,
+                        prompt, status, retrieval_latency_ms, execution_metadata
                     )
-                    VALUES ($1, $2, $3, $4, $5, 'running')
+                    VALUES ($1, $2, $3, $4, $5, $6, 'running', $7, $8::jsonb)
                     ON CONFLICT (id) DO UPDATE SET
+                        pipeline_version = EXCLUDED.pipeline_version,
                         query = EXCLUDED.query,
                         retrieved_chunk_ids = EXCLUDED.retrieved_chunk_ids,
                         prompt = EXCLUDED.prompt,
+                        retrieval_latency_ms = EXCLUDED.retrieval_latency_ms,
+                        execution_metadata = EXCLUDED.execution_metadata,
                         status = 'running'
                     """,
                     run_id,
                     pipeline_id,
+                    pipeline_version,
                     query,
                     retrieved_chunk_ids,
                     prompt,
+                    retrieval_latency_ms,
+                    json.dumps(execution_metadata or {}),
                 )
         except Exception as exc:
             logger.exception("Failed to create pipeline_run %s before LLM call: %s", run_id, exc)
@@ -138,6 +191,7 @@ class GenerationPipeline:
         output_tokens: int,
         latency_ms: int,
         model_used: str,
+        cost_usd: float | None = None,
     ) -> None:
         """Update the pipeline_runs record with completed generation and metrics."""
         try:
@@ -151,8 +205,9 @@ class GenerationPipeline:
                         output_tokens = $4,
                         latency_ms = $5,
                         model_used = $6,
+                        cost_usd = $7,
                         status = 'completed'
-                    WHERE id = $7 AND pipeline_id = $8
+                    WHERE id = $8 AND pipeline_id = $9
                     """,
                     generation,
                     json.dumps(citations),
@@ -160,6 +215,7 @@ class GenerationPipeline:
                     output_tokens,
                     latency_ms,
                     model_used,
+                    cost_usd,
                     run_id,
                     pipeline_id,
                 )
@@ -230,20 +286,77 @@ class GenerationPipeline:
         max_context_tokens: int = 4000,
         rerank: bool = True,
         model_name: str | None = None,
+        pipeline_version: int | None = None,
+        config: Any = None,
+        temperature: float | None = None,
     ) -> GenerationResult:
-        """Execute complete non-streaming generation pipeline."""
+        """Execute complete non-streaming generation pipeline with configuration and versioning."""
         target_run_id = run_id or uuid4()
         start_time = time.perf_counter()
 
+        # Load pipeline configuration if not passed directly
+        cfg_dict: dict[str, Any] | None = None
+        effective_version = pipeline_version
+
+        if config is not None:
+            cfg_dict = config.model_dump() if hasattr(config, "model_dump") else dict(config)
+        else:
+            ver, loaded_cfg = await self._load_pipeline_config(pipeline_id, pipeline_version)
+            cfg_dict = loaded_cfg
+            if effective_version is None:
+                effective_version = ver
+
+        # Map configuration settings
+        if cfg_dict:
+            retrieval_cfg = cfg_dict.get("retrieval", {})
+            gen_cfg = cfg_dict.get("generation", {})
+            eval_cfg = cfg_dict.get("evaluation", {})
+
+            effective_dense_k = retrieval_cfg.get("dense_k", top_k * 2)
+            effective_sparse_k = retrieval_cfg.get("sparse_k", top_k * 2)
+            effective_top_k = retrieval_cfg.get("top_k_after_rerank", top_k)
+            reranker_type = retrieval_cfg.get("reranker", "cross-encoder" if rerank else "none")
+            apply_expansion = retrieval_cfg.get("query_expansion", True)
+            apply_filters = retrieval_cfg.get("metadata_filters_enabled", True)
+
+            effective_max_tokens = gen_cfg.get("max_context_tokens", max_context_tokens)
+            effective_model = model_name or gen_cfg.get("model_routing", "gpt-4o-mini")
+            effective_temp = temperature if temperature is not None else gen_cfg.get("temperature", 0.7)
+            auto_evaluate = eval_cfg.get("auto_evaluate", True)
+        else:
+            effective_dense_k = top_k * 2
+            effective_sparse_k = top_k * 2
+            effective_top_k = top_k
+            reranker_type = "cross-encoder" if rerank else "none"
+            apply_expansion = True
+            apply_filters = True
+            effective_max_tokens = max_context_tokens
+            effective_model = model_name or "gpt-4o-mini"
+            effective_temp = temperature if temperature is not None else 0.7
+            auto_evaluate = True
+
+        retrieval_start = time.perf_counter()
+
         # 1. Query Processing
-        processed = await self.processor.process(query)
+        if apply_expansion:
+            processed = await self.processor.process(query)
+        else:
+            from pipelines.retrieval.query_processor import ProcessedQuery
+            processed = ProcessedQuery(
+                query=query,
+                query_type="factual",
+                expanded_queries=[query],
+                filters={},
+            )
 
         # 2. Parallel Multi-Method Retrieval
+        filters_to_apply = processed.filters if apply_filters else None
+        retrieval_k = max(effective_dense_k, effective_sparse_k)
         dense_res, sparse_res, meta_res = await self.retriever.retrieve_parallel(
             query=processed,
-            k=top_k * 2,
+            k=retrieval_k,
             pipeline_id=pipeline_id,
-            filters=processed.filters,
+            filters=filters_to_apply,
         )
 
         # 3. Reciprocal Rank Fusion
@@ -253,7 +366,7 @@ class GenerationPipeline:
         fused = reciprocal_rank_fusion(result_lists)
 
         # 4. Optional Reranking
-        if rerank and fused:
+        if reranker_type != "none" and fused:
             try:
                 candidates = await self.reranker.rerank(processed.query, fused, top_n=40)
             except Exception as rerank_err:
@@ -262,16 +375,18 @@ class GenerationPipeline:
         else:
             candidates = fused
 
-        top_candidates = candidates[:top_k]
+        top_candidates = candidates[:effective_top_k]
 
         # 5. Context Assembly
-        assembled = self.assembler.assemble(top_candidates, max_tokens=max_context_tokens)
+        assembled = self.assembler.assemble(top_candidates, max_tokens=effective_max_tokens)
+        retrieval_latency_ms = int((time.perf_counter() - retrieval_start) * 1000)
 
         # 6. Prompt Assembly
         prompt = self.prompt_builder.build(
             query=processed.query,
             query_type=processed.query_type,
             context=assembled,
+            pipeline_config=cfg_dict,
         )
 
         # Convert chunk IDs to UUIDs for DB schema compatibility
@@ -289,28 +404,33 @@ class GenerationPipeline:
             query=query,
             retrieved_chunk_ids=retrieved_uuids,
             prompt=prompt.full_prompt,
+            pipeline_version=effective_version,
+            retrieval_latency_ms=retrieval_latency_ms,
+            execution_metadata={"config_used": cfg_dict} if cfg_dict else {},
         )
 
         # 8. Call LLM
-        effective_model = model_name or "gpt-4o-mini"
         messages = [
             ChatMessage(role="system", content=prompt.system_prompt),
             ChatMessage(role="user", content=prompt.user_prompt),
         ]
 
         try:
+            cost_usd: float | None = None
             if self.client and hasattr(self.client, "chat"):
-                llm_res = await self.client.chat(messages)
+                llm_res = await self.client.chat(messages, temperature=effective_temp)
                 content = llm_res.content
                 in_tokens = llm_res.input_tokens
                 out_tokens = llm_res.output_tokens
                 used_model = getattr(llm_res, "model", effective_model)
+                cost_usd = getattr(llm_res, "cost_usd", None)
             else:
                 # Deterministic fallback if mock / testing
                 content = f"Based on the provided context [Source 1], the answer is clearly documented."
                 in_tokens = self.token_counter.count(prompt.full_prompt)
                 out_tokens = self.token_counter.count(content)
                 used_model = effective_model
+                cost_usd = 0.0001
 
             # 9. Citation parsing and validation
             parsed_citations = self.citation_tracker.extract_and_validate(
@@ -330,12 +450,14 @@ class GenerationPipeline:
                 output_tokens=out_tokens,
                 latency_ms=latency_ms,
                 model_used=used_model,
+                cost_usd=cost_usd,
             )
 
-            # 11. Enqueue async eval job
-            asyncio.create_task(
-                self._enqueue_eval_job(str(target_run_id), str(pipeline_id))
-            )
+            # 11. Enqueue async eval job if auto_evaluate is enabled
+            if auto_evaluate:
+                asyncio.create_task(
+                    self._enqueue_eval_job(str(target_run_id), str(pipeline_id))
+                )
 
             return GenerationResult(
                 run_id=str(target_run_id),
@@ -350,6 +472,9 @@ class GenerationPipeline:
                 latency_ms=latency_ms,
                 model_used=used_model,
                 status="completed",
+                pipeline_version=effective_version,
+                retrieval_latency_ms=retrieval_latency_ms,
+                cost_usd=cost_usd,
             )
 
         except Exception as exc:

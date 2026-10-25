@@ -45,6 +45,9 @@ class QueryRequest(BaseModel):
         default=4000, ge=100, le=20000, description="Token budget for context"
     )
     rerank: bool = Field(default=True, description="Whether to apply reranking")
+    pipeline_version: int | None = Field(
+        default=None, ge=1, description="Specific pipeline version to execute"
+    )
 
 
 class CitationItem(BaseModel):
@@ -108,6 +111,7 @@ async def post_query(request: QueryRequest, req: Request):
                 top_k=request.top_k,
                 max_context_tokens=request.max_context_tokens,
                 rerank=request.rerank,
+                pipeline_version=request.pipeline_version,
             )
             return QueryResponse(
                 run_id=result.run_id,

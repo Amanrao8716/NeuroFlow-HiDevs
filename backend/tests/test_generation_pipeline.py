@@ -109,7 +109,7 @@ async def test_generation_pipeline_runs_and_persists_before_llm(mock_pipeline_co
         finish_reason="stop",
     )
 
-    async def mock_create(run_id, pipeline_id, query, retrieved_chunk_ids, prompt):
+    async def mock_create(run_id, pipeline_id, query, retrieved_chunk_ids, prompt, *args, **kwargs):
         call_order.append("create_run")
 
     async def mock_chat(messages, **kwargs):

@@ -93,8 +93,17 @@ class PromptBuilder:
         clean_query = query.strip()
         norm_type = (query_type or "factual").strip().lower()
         type_instruction = QUERY_TYPE_INSTRUCTIONS.get(norm_type, DEFAULT_INSTRUCTION)
-
         system_prompt = f"{self.base_system_prompt}\n\n{type_instruction}"
+
+        if pipeline_config:
+            gen_cfg = pipeline_config.get("generation", {})
+            variant = gen_cfg.get("system_prompt_variant", "default")
+            if variant == "concise":
+                system_prompt += "\n\nStyle Instruction: Keep answers extremely concise and direct, omitting conversational filler."
+            elif variant == "detailed":
+                system_prompt += "\n\nStyle Instruction: Provide comprehensive, in-depth explanations with thorough source analysis."
+            elif variant == "technical":
+                system_prompt += "\n\nStyle Instruction: Use rigorous, precise engineering terminology and architectural detail."
 
         # Build context blocks and deterministic source map
         context_blocks: list[str] = []
