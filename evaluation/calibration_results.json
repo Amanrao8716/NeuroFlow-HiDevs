@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-10-25T19:47:16.840567+00:00",
+  "status": "failed",
+  "sample_count": 30,
+  "evaluated_count": 0,
+  "metric_weights": {
+    "faithfulness": 0.35,
+    "answer_relevance": 0.3,
+    "context_precision": 0.2,
+    "context_recall": 0.15
+  },
+  "error": "LLM evaluator call failed during calibration: LLM call failed: Error code: 429 - {'error': {'message': 'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.', 'type': 'insufficient_quota', 'param': None, 'code': 'credit_balance_exhausted'}}",
+  "provenance": {
+    "dataset_path": "/app/evaluation/calibration/annotated_set.json",
+    "evaluator_model": "gpt-4o",
+    "executed_live_evaluation": true
+  },
+  "faithfulness_pearson_correlation": null,
+  "overall_score_pearson_correlation": null,
+  "is_calibrated": false
+}

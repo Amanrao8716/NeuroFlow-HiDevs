@@ -6,6 +6,7 @@ import logging
 
 import httpx
 import redis.asyncio as redis
+from api.evaluations import router as evaluations_router
 from api.ingest import router as ingest_router
 from api.query import router as query_router
 from api.retrieve import router as retrieve_router
@@ -87,6 +88,7 @@ app = FastAPI(
 app.include_router(ingest_router)
 app.include_router(retrieve_router)
 app.include_router(query_router)
+app.include_router(evaluations_router)
 
 
 @app.get("/")

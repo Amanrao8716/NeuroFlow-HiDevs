@@ -101,4 +101,41 @@ Inside the Docker container:
 ```bash
 docker compose --env-file .env -f infra/docker-compose.yml exec api python -m pytest tests/ -v
 ```
-All 42 tests pass across provider routing, ingestion, hybrid retrieval, prompt assembly, citation tracking, and streaming API.
+All 59 tests pass across provider routing, ingestion, hybrid retrieval, prompt assembly, citation tracking, streaming API, RAGAS metrics, judge evaluation, human calibration, and Pearson correlation runner.
+
+---
+
+## Task 7 — Automated Evaluation Framework with LLM-as-Judge and RAGAS Metrics
+
+NeuroFlow implements an automated evaluation framework to assess RAG pipeline outputs, establish judge calibration against human ratings, and curate fine-tuning datasets from high-quality responses.
+
+### Evaluation Metrics
+Evaluations are computed concurrently via `asyncio.gather` across four metrics:
+
+| Metric | Target | Formula / Description | Weight |
+|---|---|---|---|
+| **Faithfulness** | Groundedness | Fraction of claims in the generated answer supported by retrieved context | 0.35 |
+| **Answer Relevance** | Intent alignment | Extent to which answer directly and completely addresses the user prompt | 0.30 |
+| **Context Precision** | Ranking quality | Relevance of retrieved chunks with higher rank given to top passages | 0.20 |
+| **Context Recall** | Information coverage | Fraction of required facts present in the retrieved context passages | 0.15 |
+
+$$\text{Overall Score} = 0.35 \cdot \text{Faithfulness} + 0.30 \cdot \text{Answer Relevance} + 0.20 \cdot \text{Context Precision} + 0.15 \cdot \text{Context Recall}$$
+
+### Automatic Fine-Tuning Pair Promotion
+When `overall_score > 0.80`, the `EvaluationJudge` automatically stores the run in the `training_pairs` table with the user query, system prompt, generated assistant response, and quality score for future fine-tuning jobs.
+
+### Human Rating and Calibration Endpoint
+Submit human feedback (1 to 5 stars) to calibrate the judge model:
+```bash
+curl.exe -X PATCH "http://localhost:8000/runs/<RUN_UUID>/rating" \
+  -H "Content-Type: application/json" \
+  -d '{"rating": 5, "pipeline_id": "<PIPELINE_UUID>"}'
+```
+Calibration is flagged (`calibration_needed: true`) whenever $|\text{overall\_score} - (\text{rating} / 5.0)| > 0.30$.
+
+### Calibration Benchmark Runner
+Run the repeatable 30-sample benchmark to compute Pearson correlation:
+```bash
+docker exec infra-api-1 python -m evaluation.calibration_runner
+```
+Outputs are saved to `evaluation/calibration_results.json` showing Pearson correlation ($r \ge 0.85$) and MAE metrics.

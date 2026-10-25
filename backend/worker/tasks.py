@@ -195,3 +195,33 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                 )
 
             raise
+
+
+async def evaluate_pipeline_run(ctx, run_id: str, pipeline_id: str):
+    """Asynchronously evaluate a completed RAG pipeline run using LLM-as-a-judge."""
+    from evaluation.judge import EvaluationJudge
+
+    redis = ctx.get("redis")
+    client = NeuroFlowClient(redis) if redis else None
+    judge = EvaluationJudge(llm_client=client)
+
+    with tracer.start_as_current_span("evaluation.process") as span:
+        span.set_attribute("run_id", run_id)
+        span.set_attribute("pipeline_id", pipeline_id)
+        try:
+            report = await judge.evaluate_run_from_db(
+                run_id=run_id,
+                pipeline_id=pipeline_id,
+            )
+            span.set_attribute("overall_score", report.overall_score)
+            span.set_attribute("judge_model", report.judge_model)
+            logger.info(
+                "Evaluation complete for run %s: overall_score=%.4f (candidate=%s)",
+                run_id,
+                report.overall_score,
+                report.is_training_candidate,
+            )
+            return report.to_dict()
+        except Exception as exc:
+            logger.exception("Evaluation failed for run %s: %s", run_id, exc)
+            raise

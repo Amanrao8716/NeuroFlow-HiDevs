@@ -24,6 +24,7 @@ RUN pip install --upgrade pip \
 
 COPY backend/ /app/
 COPY pipelines/ /app/pipelines/
+COPY evaluation/ /app/evaluation/
 
 RUN ln -s /app /app/backend
 
