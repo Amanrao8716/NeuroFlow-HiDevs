@@ -533,11 +533,14 @@ async def get_pipeline_analytics(pipeline_id: UUID):
             "overall_score": round(eval_row["avg_overall"], 4) if eval_row and eval_row["avg_overall"] is not None else None,
         }
 
-        # 3. 30-day query count buckets
+        # 3. 30-day query count and cost buckets
         thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=29)
         daily_rows = await conn.fetch(
             """
-            SELECT DATE(created_at) as run_date, COUNT(*) as query_count
+            SELECT DATE(created_at) as run_date,
+                   COUNT(*) as query_count,
+                   AVG(cost_usd) as avg_cost,
+                   SUM(cost_usd) as total_cost
             FROM pipeline_runs
             WHERE pipeline_id = $1 AND created_at >= $2
             GROUP BY DATE(created_at)
@@ -547,8 +550,17 @@ async def get_pipeline_analytics(pipeline_id: UUID):
         )
 
         daily_map = {str(r["run_date"]): int(r["query_count"]) for r in daily_rows}
+        cost_map = {
+            str(r["run_date"]): {
+                "avg_cost": round(float(r["avg_cost"]), 6) if r["avg_cost"] is not None else 0.0,
+                "total_cost": round(float(r["total_cost"]), 6) if r["total_cost"] is not None else 0.0,
+            }
+            for r in daily_rows
+        }
+
         today = date.today()
         daily_counts: list[DailyQueryCount] = []
+        cost_trends: list[dict[str, Any]] = []
         total_30d = 0
 
         for day_offset in range(29, -1, -1):
@@ -557,6 +569,55 @@ async def get_pipeline_analytics(pipeline_id: UUID):
             cnt = daily_map.get(date_str, 0)
             daily_counts.append(DailyQueryCount(date=date_str, count=cnt))
             total_30d += cnt
+
+            c_info = cost_map.get(date_str, {"avg_cost": 0.0, "total_cost": 0.0})
+            cost_trends.append({
+                "date": date_str,
+                "cost_per_query": c_info["avg_cost"],
+                "total_cost": c_info["total_cost"],
+            })
+
+        # 4. Recent failed runs
+        failed_rows = await conn.fetch(
+            """
+            SELECT id, query, error_message, latency_ms, created_at
+            FROM pipeline_runs
+            WHERE pipeline_id = $1 AND status = 'failed'
+            ORDER BY created_at DESC
+            LIMIT 10
+            """,
+            pipeline_id,
+        )
+        recent_failed = [
+            {
+                "run_id": str(r["id"]),
+                "query": r["query"],
+                "error_message": r["error_message"] or "Unknown execution error",
+                "latency_ms": r["latency_ms"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in failed_rows
+        ]
+
+        # 5. 7-day daily score trend for sparkline
+        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=6)
+        score_rows = await conn.fetch(
+            """
+            SELECT DATE(e.evaluated_at) as eval_date, AVG(e.overall_score) as avg_score
+            FROM evaluations e
+            JOIN pipeline_runs r ON r.id = e.run_id
+            WHERE r.pipeline_id = $1 AND e.evaluated_at >= $2
+            GROUP BY DATE(e.evaluated_at)
+            ORDER BY DATE(e.evaluated_at) ASC
+            """,
+            pipeline_id,
+            seven_days_ago,
+        )
+        score_map = {str(r["eval_date"]): round(float(r["avg_score"]), 4) for r in score_rows}
+        daily_scores_7d: list[dict[str, Any]] = []
+        for d in range(6, -1, -1):
+            cur = (today - timedelta(days=d)).isoformat()
+            daily_scores_7d.append({"date": cur, "score": score_map.get(cur)})
 
         return AnalyticsResponse(
             pipeline_id=str(pipeline_id),
@@ -570,6 +631,9 @@ async def get_pipeline_analytics(pipeline_id: UUID):
             daily_query_counts=daily_counts,
             total_queries_30d=total_30d,
             percentile_method="linear_interpolation",
+            cost_trends_30d=cost_trends,
+            recent_failed_runs=recent_failed,
+            daily_scores_7d=daily_scores_7d,
         )
 
 

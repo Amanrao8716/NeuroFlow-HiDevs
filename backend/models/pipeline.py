@@ -358,6 +358,9 @@ class AnalyticsResponse(BaseModel):
     daily_query_counts: list[DailyQueryCount]
     total_queries_30d: int
     percentile_method: str = "linear_interpolation"
+    cost_trends_30d: list[dict[str, Any]] | None = None
+    recent_failed_runs: list[dict[str, Any]] | None = None
+    daily_scores_7d: list[dict[str, Any]] | None = None
 
 
 class SuggestionItem(BaseModel):

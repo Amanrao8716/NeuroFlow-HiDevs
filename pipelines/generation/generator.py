@@ -531,15 +531,22 @@ class GenerationPipeline:
             assembled = self.assembler.assemble(top_candidates, max_tokens=max_context_tokens)
 
             # 3. Event: retrieval_complete
-            source_filenames = [
-                s.get("filename") or "document"
-                for s in assembled.sources
-                if s.get("filename")
-            ]
             yield {
                 "type": "retrieval_complete",
                 "chunk_count": assembled.chunks_used,
-                "sources": source_filenames,
+                "sources": assembled.sources,
+                "retrieval_metadata": {
+                    "query": processed.query,
+                    "query_type": processed.query_type,
+                    "dense_count": len(dense_res),
+                    "sparse_count": len(sparse_res),
+                    "meta_count": len(meta_res),
+                    "fused_count": len(fused),
+                    "reranked_count": len(candidates),
+                    "top_candidates_count": len(top_candidates),
+                    "context_chunks_used": assembled.chunks_used,
+                    "total_tokens": assembled.total_tokens,
+                },
             }
 
             # 4. Prompt Assembly

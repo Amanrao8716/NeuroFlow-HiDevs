@@ -343,3 +343,118 @@ async def get_document(
         "metadata": document["metadata"],
         "created_at": document["created_at"].isoformat(),
     }
+
+
+@router.get("/documents")
+async def list_documents(
+    pipeline_id: UUID,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """List documents for a given pipeline with status, chunk count, and metadata."""
+    async with pipeline_connection(pipeline_id) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, filename, source_type, status, chunk_count,
+                   metadata, created_at
+            FROM documents
+            WHERE pipeline_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            """,
+            pipeline_id,
+            limit,
+            offset,
+        )
+
+    return [
+        {
+            "id": str(r["id"]),
+            "document_id": str(r["id"]),
+            "filename": r["filename"],
+            "source_type": r["source_type"],
+            "status": r["status"],
+            "chunk_count": r["chunk_count"] or 0,
+            "metadata": r["metadata"] if isinstance(r["metadata"], dict) else json.loads(r["metadata"] or "{}"),
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/documents/{document_id}/chunks")
+async def get_document_chunks(
+    document_id: UUID,
+    pipeline_id: UUID | None = None,
+    limit: int = 100,
+):
+    """Retrieve all chunks belonging to a document."""
+    from db.pool import connection
+    if connection is None:
+        raise HTTPException(status_code=503, detail="Database pool unavailable")
+
+    async with connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.id, c.document_id, c.content, c.chunk_index, c.token_count, c.metadata, c.created_at,
+                   d.filename, d.source_type
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.document_id = $1
+            ORDER BY c.chunk_index ASC
+            LIMIT $2
+            """,
+            document_id,
+            limit,
+        )
+
+    return [
+        {
+            "chunk_id": str(r["id"]),
+            "document_id": str(r["document_id"]),
+            "content": r["content"],
+            "chunk_index": r["chunk_index"],
+            "token_count": r["token_count"],
+            "metadata": r["metadata"] if isinstance(r["metadata"], dict) else json.loads(r["metadata"] or "{}"),
+            "filename": r["filename"],
+            "source_type": r["source_type"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/chunks/{chunk_id}")
+async def get_chunk(chunk_id: UUID):
+    """Retrieve chunk details, content, and parent document metadata."""
+    from db.pool import connection
+    if connection is None:
+        raise HTTPException(status_code=503, detail="Database pool unavailable")
+
+    async with connection() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT c.id, c.document_id, c.content, c.chunk_index, c.token_count, c.metadata, c.created_at,
+                   d.filename, d.source_type, d.pipeline_id
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.id = $1
+            """,
+            chunk_id,
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    return {
+        "chunk_id": str(row["id"]),
+        "document_id": str(row["document_id"]),
+        "content": row["content"],
+        "chunk_index": row["chunk_index"],
+        "token_count": row["token_count"],
+        "metadata": row["metadata"] if isinstance(row["metadata"], dict) else json.loads(row["metadata"] or "{}"),
+        "filename": row["filename"],
+        "source_type": row["source_type"],
+        "pipeline_id": str(row["pipeline_id"]) if row["pipeline_id"] else None,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }

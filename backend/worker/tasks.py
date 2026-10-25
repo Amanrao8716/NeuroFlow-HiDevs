@@ -1,6 +1,7 @@
 
 """Background tasks for document ingestion."""
 
+from datetime import datetime, timezone
 import json
 import logging
 import time
@@ -223,7 +224,41 @@ async def evaluate_pipeline_run(ctx, run_id: str, pipeline_id: str):
                 report.overall_score,
                 report.is_training_candidate,
             )
-            return report.to_dict()
+
+            # Publish evaluation event to Redis pub/sub channel 'evaluations:new'
+            eval_dict = report.to_dict()
+            eval_dict["evaluated_at"] = datetime.now(timezone.utc).isoformat()
+            if redis:
+                try:
+                    # Enrich with query and pipeline name if database is reachable
+                    if connection:
+                        try:
+                            async with connection() as conn:
+                                p_row = await conn.fetchrow(
+                                    """
+                                    SELECT p.name, r.query, r.generation, r.retrieved_chunk_ids
+                                    FROM pipelines p
+                                    JOIN pipeline_runs r ON r.pipeline_id = p.id
+                                    WHERE r.id = $1
+                                    """,
+                                    UUID(run_id),
+                                )
+                                if p_row:
+                                    eval_dict["pipeline_name"] = p_row["name"]
+                                    eval_dict["query"] = p_row["query"]
+                                    eval_dict["answer"] = p_row["generation"]
+                                    eval_dict["retrieved_chunk_ids"] = [
+                                        str(cid) for cid in (p_row["retrieved_chunk_ids"] or [])
+                                    ]
+                        except Exception as enrich_err:
+                            logger.debug("Could not enrich eval payload: %s", enrich_err)
+
+                    await redis.publish("evaluations:new", json.dumps(eval_dict))
+                    logger.info("Published evaluation for run %s to Redis channel evaluations:new", run_id)
+                except Exception as pub_err:
+                    logger.warning("Failed to publish evaluation to evaluations:new: %s", pub_err)
+
+            return eval_dict
         except Exception as exc:
             logger.exception("Evaluation failed for run %s: %s", run_id, exc)
             raise

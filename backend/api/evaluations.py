@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from typing import Any
+from typing import Any, AsyncGenerator
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
 
 try:
     from db.pool import connection, pipeline_connection
@@ -219,3 +222,112 @@ async def get_run_evaluation(
             user_rating=user_rating,
             calibration_needed=calibration_needed,
         )
+
+
+@router.get("/evaluations/stream")
+async def stream_evaluations(req: Request):
+    """Server-Sent Events streaming newly persisted evaluation events from Redis pub/sub."""
+    redis_client = getattr(req.app.state, "redis", None)
+    if redis_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Redis pub/sub is currently unavailable for evaluation streaming.",
+        )
+
+    async def event_generator() -> AsyncGenerator[dict[str, Any], None]:
+        pubsub = redis_client.pubsub()
+        try:
+            await pubsub.subscribe("evaluations:new")
+            logger.info("Client subscribed to Redis channel 'evaluations:new'")
+            while True:
+                if await req.is_disconnected():
+                    logger.info("Client disconnected from /evaluations/stream")
+                    break
+
+                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if msg and msg.get("type") == "message":
+                    raw_data = msg.get("data")
+                    if isinstance(raw_data, bytes):
+                        raw_data = raw_data.decode("utf-8")
+                    yield {
+                        "event": "evaluation",
+                        "data": raw_data,
+                    }
+                else:
+                    await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            logger.info("SSE evaluation stream cancelled by client")
+            raise
+        except Exception as exc:
+            logger.error("Error in evaluation stream: %s", exc)
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": str(exc)}),
+            }
+        finally:
+            try:
+                await pubsub.unsubscribe("evaluations:new")
+                await pubsub.close()
+                logger.info("Cleaned up Redis pubsub subscription for 'evaluations:new'")
+            except Exception as close_err:
+                logger.debug("Error closing pubsub: %s", close_err)
+
+    return EventSourceResponse(
+        event_generator(),
+        ping=15,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/evaluations")
+async def list_evaluations(
+    pipeline_id: UUID | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Retrieve recent evaluation records with pipeline and run details for initial feed load."""
+    if connection is None:
+        raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
+
+    async with connection() as conn:
+        filter_clause = "WHERE r.pipeline_id = $1" if pipeline_id else ""
+        query_sql = f"""
+            SELECT e.id as eval_id, e.run_id, e.faithfulness, e.answer_relevance,
+                   e.context_precision, e.context_recall, e.overall_score,
+                   e.judge_model, e.user_rating, e.evaluated_at,
+                   r.pipeline_id, p.name as pipeline_name,
+                   r.query, r.generation as answer, r.retrieved_chunk_ids
+            FROM evaluations e
+            JOIN pipeline_runs r ON r.id = e.run_id
+            JOIN pipelines p ON p.id = r.pipeline_id
+            {filter_clause}
+            ORDER BY e.evaluated_at DESC
+            LIMIT {'$2' if pipeline_id else '$1'}
+        """
+        params = [pipeline_id, limit] if pipeline_id else [limit]
+        rows = await conn.fetch(query_sql, *params)
+
+        results = []
+        for r in rows:
+            results.append({
+                "eval_id": str(r["eval_id"]),
+                "run_id": str(r["run_id"]),
+                "pipeline_id": str(r["pipeline_id"]),
+                "pipeline_name": r["pipeline_name"],
+                "query": r["query"],
+                "answer": r["answer"],
+                "retrieved_chunk_ids": [str(cid) for cid in (r["retrieved_chunk_ids"] or [])],
+                "faithfulness": r["faithfulness"],
+                "answer_relevance": r["answer_relevance"],
+                "context_precision": r["context_precision"],
+                "context_recall": r["context_recall"],
+                "overall_score": r["overall_score"],
+                "judge_model": r["judge_model"],
+                "user_rating": r["user_rating"],
+                "evaluated_at": r["evaluated_at"].isoformat() if r["evaluated_at"] else None,
+            })
+        return results

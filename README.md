@@ -377,3 +377,55 @@ Status rules:
 - **critical** — PostgreSQL or Redis unreachable
 - **degraded** — any circuit breaker OPEN, or MLflow unreachable
 - **ok** — all checks healthy
+
+---
+
+## Frontend Application (Task 11)
+
+NeuroFlow includes a production-quality observable frontend built in `frontend/` with **Next.js 14** (App Router), **TypeScript**, **Tailwind CSS**, **TanStack React Query**, **Axios**, **Zustand**, **Recharts**, **@xyflow/react**, and **@monaco-editor/react**.
+
+### Architecture & Pages
+
+1. **Query Playground (`/playground`)**
+   - Active pipeline selector with aggregate quality scores.
+   - Multiline query input with character counter.
+   - **True incremental SSE streaming** (`useSSEStream(runId)`) for real-time token reception.
+   - Early retrieved sources & relevance scores visible before answer completion.
+   - Clickable citation chips `[Source X]` opening the side drawer with full chunk content and document metadata.
+   - **Compare Mode**: Starts two independent pipeline runs concurrently with simultaneous SSE connections and post-completion word-level divergence diffing.
+   - Asynchronous LLM-as-a-judge scorecards with animated 4-metric gauges.
+   - Thumbs-up/down human feedback via `PATCH /runs/{id}/rating`.
+   - **Retrieval Inspector**: Visual React Flow graph displaying real chunk counts across Dense, Sparse, Metadata, RRF Fusion, and Cross-Encoder Reranking stages.
+
+2. **Pipeline Manager (`/pipelines`)**
+   - Pipeline cards with version, 7-day query count, 7-day daily score sparkline, and colored score thresholds (green &gt; 0.8, yellow 0.6–0.8, red &lt; 0.6).
+   - Create and Edit modal with **Monaco Editor** in JSON mode, live syntax validation, and strict Pydantic `PipelineConfig` schema checking.
+   - Analytics drawer with **Recharts**: P50/P95/P99 latency bars, 30-day cost-per-query trend area chart, 4-metric radar chart, and recent failed runs log.
+
+3. **Live Evaluation Feed (`/evaluations`)**
+   - Real-time Server-Sent Events stream connected to `GET /evaluations/stream` backed by Redis pub/sub channel `evaluations:new`.
+   - Metric filters (Faithfulness &lt; 0.7, Overall &lt; 0.8, Training Candidates &ge; 0.8), pipeline filters, and date range filters.
+   - Expandable scorecards showing query prompt, retrieved chunk IDs, and generated response.
+
+4. **Document Ingestion (`/documents`)**
+   - Multi-file drag-and-drop upload zone with drag-over feedback, file type icons, individual progress, and error handling.
+   - Document table with animated pulsing blue indicator for documents currently processing.
+   - Document detail modal listing chunk passages with token counts and a **Find Similar Chunks** action for cross-pipeline embedding search.
+
+### Environment Variables (`frontend/.env.local`)
+
+```bash
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+### Running the Frontend Locally
+
+```bash
+cd frontend
+npm install
+npm run dev
+# Or build and start production bundle:
+npm run build
+npm run start
+```
+
