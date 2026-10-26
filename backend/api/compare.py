@@ -12,7 +12,8 @@ import time
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from observability.metrics import QUERY_LATENCY, QUERY_TOTAL
@@ -24,7 +25,12 @@ except ImportError:
     connection = None
     pipeline_connection = None
 
-router = APIRouter(tags=["compare"])
+from backend.security.auth import require_scope
+from backend.security.prompt_injection import classify_query, detect_prompt_injection
+from backend.security.secrets import redact_secrets
+from backend.security.validators import sanitize_text
+
+router = APIRouter(tags=["compare"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.compare")
 
 _pipeline_instance: GenerationPipeline | None = None
@@ -56,7 +62,7 @@ def get_generation_pipeline(request: Request | None = None) -> GenerationPipelin
 class ComparePipelinesRequest(BaseModel):
     """Request payload for comparing two pipelines."""
 
-    query: str = Field(..., min_length=1, description="Query to execute against both pipelines")
+    query: str = Field(..., min_length=1, max_length=5000, description="Query to execute against both pipelines")
     pipeline_a_id: UUID = Field(..., description="First pipeline ID")
     pipeline_b_id: UUID = Field(..., description="Second pipeline ID")
     pipeline_a_version: int | None = Field(default=None, description="Optional version for pipeline A")
@@ -230,25 +236,38 @@ async def compare_pipelines(
 
     # 3. Obtain generator instance
     generator = get_generation_pipeline(request)
+    query_text = sanitize_text(payload.query)
+    query_text, _ = redact_secrets(query_text)
+    detection = detect_prompt_injection(query_text)
+    if detection.detected:
+        logger.warning("Comparison query matched prompt injection signal %s", detection.pattern)
+    try:
+        if await classify_query(getattr(generator, "client", None), query_text):
+            return JSONResponse(status_code=400, content={"error": "query_rejected", "reason": "potential_prompt_injection"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Query security classification unavailable.") from exc
 
     # 4. Execute both pipelines concurrently using asyncio.gather
     result_a, result_b = await asyncio.gather(
         _execute_single_pipeline(
             generator=generator,
-            query=payload.query,
+            query=query_text,
             pipeline_id=payload.pipeline_a_id,
             version=payload.pipeline_a_version,
         ),
         _execute_single_pipeline(
             generator=generator,
-            query=payload.query,
+            query=query_text,
             pipeline_id=payload.pipeline_b_id,
             version=payload.pipeline_b_version,
         ),
     )
 
     return ComparePipelinesResponse(
-        query=payload.query,
+        query=query_text,
         pipeline_a=result_a,
         pipeline_b=result_b,
     )

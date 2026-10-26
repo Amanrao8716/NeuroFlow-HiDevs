@@ -10,14 +10,19 @@ import time
 from typing import Any, AsyncGenerator
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from observability.metrics import QUERY_LATENCY, QUERY_TOTAL
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from pipelines.generation.generator import GenerationPipeline, GenerationResult
+from backend.security.auth import require_scope
+from backend.security.prompt_injection import classify_query, detect_prompt_injection
+from backend.security.validators import sanitize_text
+from backend.security.secrets import redact_secrets
 
-router = APIRouter(tags=["generation"])
+router = APIRouter(tags=["generation"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.query")
 
 _pipeline_instance: GenerationPipeline | None = None
@@ -49,7 +54,7 @@ def get_generation_pipeline(request: Request | None = None) -> GenerationPipelin
 class QueryRequest(BaseModel):
     """Request model for POST /query endpoint."""
 
-    query: str = Field(..., min_length=1, max_length=20000, description="User search query")
+    query: str = Field(..., min_length=1, max_length=5000, description="User search query")
     pipeline_id: UUID = Field(..., description="Tenant pipeline ID for data isolation")
     stream: bool = Field(default=False, description="Whether to stream response tokens via SSE")
     top_k: int = Field(default=10, ge=1, le=50, description="Top K retrieval candidates")
@@ -111,7 +116,25 @@ async def post_query(request: QueryRequest, req: Request):
     If stream=false, returns complete JSON response with citations and metadata.
     If stream=true, creates run ID and initiates stream channel for GET /query/{run_id}/stream.
     """
+    cleaned_query = sanitize_text(request.query)
+    if not cleaned_query.strip():
+        raise HTTPException(status_code=422, detail="Query must contain text.")
+    cleaned_query, secret_types = redact_secrets(cleaned_query)
+    for pattern_type in sorted(set(secret_types)):
+        logger.warning("Sensitive value redacted from query (%s).", pattern_type)
+    injection = detect_prompt_injection(cleaned_query)
+    if injection.detected:
+        logger.warning("User query matched prompt injection signal %s", injection.pattern)
+    request.query = cleaned_query
     pipeline = get_generation_pipeline(req)
+    try:
+        if await classify_query(getattr(pipeline, "client", None), cleaned_query):
+            return JSONResponse(status_code=400, content={"error": "query_rejected", "reason": "potential_prompt_injection"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Query security classification unavailable.") from exc
     run_id = uuid4()
 
     if not request.stream:

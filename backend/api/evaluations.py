@@ -8,7 +8,7 @@ import logging
 from typing import Any, AsyncGenerator
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -18,7 +18,9 @@ except ImportError:
     connection = None
     pipeline_connection = None
 
-router = APIRouter(tags=["evaluations"])
+from backend.security.auth import require_scope
+
+router = APIRouter(tags=["evaluations"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.evaluations")
 
 

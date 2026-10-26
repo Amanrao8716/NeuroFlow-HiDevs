@@ -14,6 +14,9 @@ opentelemetry-exporter-otlp
 openai
 anthropic
 pytest-asyncio
+PyJWT>=2.8,<3
+bleach>=6.1,<7
+detect-secrets==1.5.0
 
 # Task 4: Multi-modal ingestion
 pypdfium2

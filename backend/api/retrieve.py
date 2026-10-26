@@ -6,7 +6,8 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from pipelines.retrieval import (
@@ -17,7 +18,12 @@ from pipelines.retrieval import (
     reciprocal_rank_fusion,
 )
 
-router = APIRouter(tags=["retrieval"])
+from backend.security.auth import require_scope
+from backend.security.prompt_injection import classify_query, detect_prompt_injection
+from backend.security.validators import sanitize_text
+from backend.security.secrets import redact_secrets
+
+router = APIRouter(tags=["retrieval"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.retrieve")
 
 _processor = QueryProcessor()
@@ -29,7 +35,7 @@ _assembler = ContextAssembler()
 class RetrieveRequest(BaseModel):
     """Retrieval query request body."""
 
-    query: str = Field(..., min_length=1, max_length=20000, description="User search query")
+    query: str = Field(..., min_length=1, max_length=5000, description="User search query")
     pipeline_id: UUID = Field(..., description="Tenant pipeline ID for data isolation")
     filters: dict[str, Any] | None = Field(default=None, description="Optional metadata filters")
     top_k: int = Field(default=10, ge=1, le=50, description="Number of results to return")
@@ -68,12 +74,30 @@ class RetrieveResponse(BaseModel):
 
 
 @router.post("/retrieve", response_model=RetrieveResponse)
-async def retrieve_endpoint(request: RetrieveRequest):
+async def retrieve_endpoint(request: RetrieveRequest, req: Request):
     """Execute hybrid retrieval, reciprocal rank fusion, optional reranking, and context assembly."""
     try:
         # 1. Query Processing
+        query_text = sanitize_text(request.query)
+        if not query_text.strip():
+            raise HTTPException(status_code=422, detail="Query must contain text.")
+        query_text, secret_types = redact_secrets(query_text)
+        for pattern_type in sorted(set(secret_types)):
+            logger.warning("Sensitive value redacted from query (%s).", pattern_type)
+        detection = detect_prompt_injection(query_text)
+        if detection.detected:
+            logger.warning("User query matched prompt injection signal %s", detection.pattern)
+        from api.query import get_generation_pipeline
+        try:
+            if await classify_query(getattr(get_generation_pipeline(req), "client", None), query_text):
+                return JSONResponse(status_code=400, content={"error": "query_rejected", "reason": "potential_prompt_injection"})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="Query security classification unavailable.") from exc
         processed = await _processor.process(
-            request.query, explicit_filters=request.filters
+            query_text, explicit_filters=request.filters
         )
 
         # 2. Parallel Multi-Method Retrieval (Dense, Sparse, Metadata)

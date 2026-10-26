@@ -1,6 +1,7 @@
 from urllib.parse import quote
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -30,6 +31,7 @@ class Settings(BaseSettings):
     # Internal observability API
     observability_service_token: str | None = None
     neuroflow_api_url: str = "http://localhost:8000"
+    max_upload_size_bytes: int = Field(default=100 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
 
     model_config = SettingsConfigDict(
         env_file=".env",

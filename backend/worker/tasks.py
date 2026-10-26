@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any
 from uuid import UUID
@@ -31,9 +32,32 @@ from pipelines.ingestion.url_extractor import extract_url
 from pipelines.ingestion.chunker import chunk_pages
 from pipelines.finetuning.tracker import MLflowTracker
 from providers.client import NeuroFlowClient
+from backend.security.prompt_injection import detect_prompt_injection
+from backend.security.secrets import redact_metadata, redact_secrets
+from backend.security.validators import sanitize_text
 
 logger = logging.getLogger("neuroflow.ingestion")
 tracer = trace.get_tracer("neuroflow.ingestion")
+
+
+def secure_extracted_pages(pages, document_id: str):
+    """Sanitize page content and metadata before chunking or embedding."""
+    for page in pages:
+        page.content = sanitize_text(page.content)
+        injection = detect_prompt_injection(page.content)
+        if injection.detected:
+            page.metadata["prompt_injection_detected"] = True
+            page.metadata["prompt_injection_pattern"] = injection.pattern
+        page.content, detected_secrets = redact_secrets(page.content)
+        page.metadata = redact_metadata(page.metadata)
+        if detected_secrets:
+            for pattern_type in sorted(set(detected_secrets)):
+                logger.warning(json.dumps({
+                    "event": "secret_redacted",
+                    "document_id": document_id,
+                    "pattern_type": pattern_type,
+                }))
+    return pages
 
 
 async def startup(ctx):
@@ -214,6 +238,11 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
             with tracer.start_as_current_span("ingestion.extract"):
                 if source_type == "url":
                     pages = await extract_url(metadata["url"])
+                elif settings.app_env == "production" or os.environ.get("NEUROFLOW_EXTRACTION_SANDBOX", "false").lower() == "true":
+                    from backend.security.sandbox import DockerExtractionSandbox
+                    pages = await asyncio.to_thread(
+                        DockerExtractionSandbox().extract, source_type, source_bytes
+                    )
                 elif source_type == "pdf":
                     pages = extract_pdf(source_bytes)
                     for page in pages:
@@ -231,6 +260,10 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
 
             if not pages:
                 raise ValueError("No content could be extracted.")
+
+            # Scan and redact before chunking: semantic chunking may itself call
+            # the embedder, so redaction must happen at the page boundary.
+            pages = secure_extracted_pages(pages, document_id)
 
             page_count = len(pages)
             span.set_attribute("page_count", page_count)
@@ -317,7 +350,8 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
             )
 
         except Exception as exc:
-            logger.exception("Ingestion failed for document %s", document_id)
+            # Exception messages from document parsers can contain source text.
+            logger.error("Ingestion failed for document %s (%s).", document_id, type(exc).__name__)
 
             async with pipeline_connection(tenant_id) as conn:
                 await conn.execute(
@@ -328,7 +362,7 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                     WHERE id = $1
                     """,
                     doc_id,
-                    json.dumps({"error": str(exc)[:500]}),
+                    json.dumps({"error": "Document processing failed."}),
                 )
 
             INGESTION_DOCUMENTS.labels(status="failed").inc()
@@ -472,11 +506,22 @@ async def _submit_quality_anomaly(
             run_id,
         )
         return
+    worker_client_id = os.environ.get("NEUROFLOW_WORKER_CLIENT_ID", "")
+    worker_client_secret = os.environ.get("NEUROFLOW_WORKER_CLIENT_SECRET", "")
+    if not worker_client_id or not worker_client_secret:
+        logger.error("Quality anomaly API credentials are not configured.")
+        return
     try:
         async with httpx.AsyncClient(
             base_url=settings.neuroflow_api_url.rstrip("/"),
             timeout=10,
         ) as client:
+            token_response = await client.post(
+                "/auth/token",
+                json={"client_id": worker_client_id, "client_secret": worker_client_secret},
+            )
+            token_response.raise_for_status()
+            api_token = token_response.json()["access_token"]
             response = await client.post(
                 f"/pipelines/{pipeline_id}/suggestions",
                 json={
@@ -486,9 +531,8 @@ async def _submit_quality_anomaly(
                     "baseline_stddev": baseline_stddev,
                 },
                 headers={
-                    "Authorization": (
-                        f"Bearer {settings.observability_service_token}"
-                    )
+                    "Authorization": f"Bearer {api_token}",
+                    "X-Observability-Service-Token": settings.observability_service_token,
                 },
             )
             response.raise_for_status()

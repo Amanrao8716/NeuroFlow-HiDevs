@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
 from config import settings
@@ -35,7 +35,10 @@ except ImportError:
     connection = None
     pipeline_connection = None
 
-router = APIRouter(prefix="/pipelines", tags=["pipelines"])
+from backend.security.auth import get_current_user, require_scope
+from backend.security.validators import sanitize_text
+
+router = APIRouter(prefix="/pipelines", tags=["pipelines"], dependencies=[Depends(get_current_user)])
 logger = logging.getLogger("neuroflow.api.pipelines")
 
 
@@ -115,8 +118,13 @@ def deep_merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]
 
 
 @router.post("", response_model=PipelineResponse, status_code=status.HTTP_201_CREATED)
-async def create_pipeline(payload: PipelineCreateRequest):
+async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require_scope("admin"))):
     """Validate and create a new RAG pipeline, establishing version 1."""
+    payload.name = sanitize_text(payload.name).strip()
+    if payload.description is not None:
+        payload.description = sanitize_text(payload.description)
+    if not payload.name or len(payload.name) > 100:
+        raise HTTPException(status_code=422, detail="Pipeline name must be 1 to 100 characters.")
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
 
@@ -177,7 +185,7 @@ async def create_pipeline(payload: PipelineCreateRequest):
 
 
 @router.get("", response_model=list[PipelineResponse])
-async def list_pipelines(include_archived: bool = Query(default=False)):
+async def list_pipelines(include_archived: bool = Query(default=False), _scope=Depends(require_scope("query"))):
     """List non-archived pipelines with their current version and configuration."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -222,7 +230,7 @@ async def list_pipelines(include_archived: bool = Query(default=False)):
 
 
 @router.get("/{pipeline_id}", response_model=PipelineResponse)
-async def get_pipeline(pipeline_id: UUID):
+async def get_pipeline(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
     """Retrieve full pipeline configuration, current version, and aggregate evaluation scores."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -282,7 +290,7 @@ async def get_pipeline(pipeline_id: UUID):
 
 
 @router.patch("/{pipeline_id}", response_model=PipelineResponse)
-async def update_pipeline(pipeline_id: UUID, payload: PipelineUpdateRequest):
+async def update_pipeline(pipeline_id: UUID, payload: PipelineUpdateRequest, _admin=Depends(require_scope("admin"))):
     """Update pipeline configuration and create a new immutable version.
 
     Nested configuration objects (ingestion, retrieval, generation, evaluation)
@@ -310,6 +318,10 @@ async def update_pipeline(pipeline_id: UUID, payload: PipelineUpdateRequest):
         # Merge top-level fields
         new_name = payload.name if payload.name is not None else current_name
         new_desc = payload.description if payload.description is not None else current_desc
+        new_name = sanitize_text(new_name).strip()
+        new_desc = sanitize_text(new_desc) if new_desc is not None else None
+        if not new_name or len(new_name) > 100:
+            raise HTTPException(status_code=422, detail="Pipeline name must be 1 to 100 characters.")
 
         # Check name conflict if renaming
         if new_name != current_name:
@@ -391,7 +403,7 @@ async def update_pipeline(pipeline_id: UUID, payload: PipelineUpdateRequest):
 
 
 @router.delete("/{pipeline_id}")
-async def delete_pipeline(pipeline_id: UUID):
+async def delete_pipeline(pipeline_id: UUID, _admin=Depends(require_scope("admin"))):
     """Soft-delete pipeline by archiving status. Preserves all runs and historical versions."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -421,6 +433,7 @@ async def get_pipeline_runs(
     pipeline_id: UUID,
     page: int = Query(default=1, ge=1, description="Page number"),
     page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
+    _scope=Depends(require_scope("query")),
 ):
     """Paginated list of execution runs for this pipeline with metrics and evaluation scores."""
     if connection is None:
@@ -500,7 +513,7 @@ async def get_pipeline_runs(
 
 
 @router.get("/{pipeline_id}/analytics", response_model=AnalyticsResponse)
-async def get_pipeline_analytics(pipeline_id: UUID):
+async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
     """Compute latency percentiles, evaluation aggregates, cost, and 30-day query trends."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -674,7 +687,7 @@ async def get_pipeline_analytics(pipeline_id: UUID):
 
 
 @router.get("/{pipeline_id}/suggestions", response_model=SuggestionsResponse)
-async def get_pipeline_suggestions(pipeline_id: UUID):
+async def get_pipeline_suggestions(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
     """Analyze recent evaluation metrics and return advisory rule-based optimization suggestions."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -735,6 +748,8 @@ async def record_quality_anomaly(
     pipeline_id: UUID,
     payload: QualityAnomalyRequest,
     authorization: str | None = Header(default=None),
+    service_token: str | None = Header(default=None, alias="X-Observability-Service-Token"),
+    _scope=Depends(require_scope("observability")),
 ) -> QualityAnomalyResponse:
     """Persist a worker-detected anomaly using the internal bearer credential."""
     expected_token = settings.observability_service_token
@@ -743,12 +758,7 @@ async def record_quality_anomaly(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Internal observability endpoint is not configured.",
         )
-    scheme, separator, supplied_token = (authorization or "").partition(" ")
-    if (
-        not separator
-        or scheme.lower() != "bearer"
-        or not hmac.compare_digest(supplied_token, expected_token)
-    ):
+    if not service_token or not hmac.compare_digest(service_token, expected_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid service credentials.",

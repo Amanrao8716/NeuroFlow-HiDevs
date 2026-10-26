@@ -117,7 +117,8 @@ async def test_internal_suggestions_persists_anomaly_and_optimizer_results(monke
             baseline_mean=0.8,
             baseline_stddev=0.1,
         ),
-        "Bearer test-token",
+        authorization="Bearer test-jwt",
+        service_token="test-token",
     )
 
     assert response.recorded is True
@@ -185,7 +186,8 @@ async def test_internal_suggestions_suppresses_anomaly_during_cooldown(monkeypat
             baseline_mean=0.8,
             baseline_stddev=0.1,
         ),
-        "Bearer test-token",
+        authorization="Bearer test-jwt",
+        service_token="test-token",
     )
 
     assert response.recorded is False

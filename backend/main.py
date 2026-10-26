@@ -15,7 +15,7 @@ from api.ingest import router as ingest_router
 from api.pipelines import router as pipelines_router
 from api.query import router as query_router
 from api.retrieve import router as retrieve_router
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -30,6 +30,8 @@ from resilience.circuit_breaker import CircuitBreakerRegistry
 from resilience.endpoint_rate_limiter import RateLimitMiddleware
 from resilience.backpressure import INGEST_QUEUE_KEY
 from resilience.timeout_manager import TimeoutManager
+from backend.security.auth import require_scope, router as auth_router
+from backend.security.middleware import SecurityHeadersMiddleware
 
 
 logging.basicConfig(level=logging.INFO)
@@ -88,6 +90,9 @@ app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
@@ -101,8 +106,10 @@ app.add_middleware(
 # Add sliding-window rate-limiting middleware
 # (Redis is not available at module level; the middleware handles None redis gracefully)
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(ingest_router)
+app.include_router(auth_router)
 app.include_router(retrieve_router)
 app.include_router(query_router)
 app.include_router(evaluations_router)
@@ -112,7 +119,7 @@ app.include_router(finetune_router)
 
 
 @app.get("/")
-async def root():
+async def root(_user=Depends(require_scope("query"))):
     """Return basic service information."""
     return {
         "service": settings.app_name,

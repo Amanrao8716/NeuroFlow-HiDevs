@@ -6,20 +6,27 @@ import json
 import logging
 from pathlib import Path
 from uuid import UUID
+import zipfile
+from io import BytesIO
 
 from arq import create_pool
 from arq.connections import RedisSettings
 from config import settings
 from db.pool import pipeline_connection
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, HttpUrl
 
 from resilience.backpressure import BackpressureGuard, QueueStatus
 
-router = APIRouter(tags=["ingestion"])
+from backend.security.auth import get_current_user, require_scope
+from backend.security.validators import validate_public_url
+from backend.security.secrets import redact_secrets
+from backend.security.validators import sanitize_text
+
+router = APIRouter(tags=["ingestion"], dependencies=[Depends(get_current_user)])
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE = 100 * 1024 * 1024
+MAX_FILE_SIZE = settings.max_upload_size_bytes
 
 SUPPORTED_TYPES = {
     ".pdf": "pdf",
@@ -30,6 +37,52 @@ SUPPORTED_TYPES = {
     ".webp": "image",
     ".csv": "csv",
 }
+
+
+def _validate_document(content_type: str | None, extension: str, data: bytes) -> None:
+    """Check declared MIME and bounded file signatures before persistence."""
+    mime_by_extension = {
+        ".pdf": {"application/pdf"},
+        ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+        ".csv": {"text/csv", "application/csv", "application/vnd.ms-excel", "text/plain"},
+        ".jpg": {"image/jpeg"}, ".jpeg": {"image/jpeg"},
+        ".png": {"image/png"}, ".webp": {"image/webp"},
+    }
+    if content_type not in mime_by_extension.get(extension, set()):
+        raise HTTPException(status_code=415, detail="Declared MIME type does not match the file type.")
+    valid = {
+        ".pdf": data.startswith(b"%PDF-") and b"/JavaScript" not in data and b"/JS" not in data,
+        ".docx": data.startswith(b"PK\x03\x04") and b"[Content_Types].xml" in data[:65536],
+        ".csv": not data.startswith((b"MZ", b"\x7fELF", b"PK\x03\x04")) and b"\x00" not in data[:8192],
+        ".jpg": data.startswith(b"\xff\xd8\xff"), ".jpeg": data.startswith(b"\xff\xd8\xff"),
+        ".png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+        ".webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+    }
+    if not valid.get(extension, False):
+        raise HTTPException(status_code=415, detail="File signature does not match a supported document.")
+    if extension == ".docx":
+        try:
+            with zipfile.ZipFile(BytesIO(data)) as archive:
+                entries = archive.infolist()
+                if len(entries) > 1000 or not any(item.filename == "[Content_Types].xml" for item in entries):
+                    raise ValueError("Invalid archive layout.")
+                expanded = 0
+                for item in entries:
+                    path = Path(item.filename)
+                    if path.is_absolute() or ".." in path.parts or item.filename.lower().endswith((".zip", ".7z", ".rar")):
+                        raise ValueError("Unsafe archive member.")
+                    expanded += item.file_size
+                    if item.file_size > 0 and item.compress_size == 0:
+                        raise ValueError("Invalid compression ratio.")
+                    if item.compress_size and item.file_size / item.compress_size > 100:
+                        raise ValueError("Excessive compression ratio.")
+                    if expanded > 200 * 1024 * 1024:
+                        raise ValueError("Archive expands beyond limit.")
+                bad_member = archive.testzip()
+                if bad_member:
+                    raise ValueError("Corrupt archive member.")
+        except (zipfile.BadZipFile, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=415, detail="DOCX archive is malformed or unsafe.") from exc
 
 
 class URLIngestRequest(BaseModel):
@@ -77,9 +130,13 @@ async def ingest_file(
     request: Request,
     pipeline_id: UUID = Form(...),
     file: UploadFile = File(...),
+    _scope=Depends(require_scope("ingest")),
 ):
     """Accept a file, deduplicate it, and queue background processing."""
-    filename = Path(file.filename or "").name
+    filename = sanitize_text(Path(file.filename or "").name)
+    filename, detected_filename_secrets = redact_secrets(filename)
+    if detected_filename_secrets:
+        logger.warning("Sensitive value redacted from uploaded filename.")
     extension = Path(filename).suffix.lower()
     source_type = SUPPORTED_TYPES.get(extension)
 
@@ -102,6 +159,8 @@ async def ingest_file(
             status_code=400,
             detail="Uploaded file is empty.",
         )
+
+    _validate_document(file.content_type, extension, file_bytes)
 
     content_hash = hashlib.sha256(file_bytes).hexdigest()
 
@@ -204,9 +263,14 @@ async def ingest_file(
 async def ingest_url(
     payload: URLIngestRequest,
     request: Request,
+    _scope=Depends(require_scope("ingest")),
 ):
     """Accept a URL and queue background processing."""
     normalized_url = str(payload.url)
+    try:
+        validate_public_url(normalized_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="URL is not an allowed public destination.") from exc
     content_hash = hashlib.sha256(
         normalized_url.encode("utf-8")
     ).hexdigest()
@@ -312,6 +376,7 @@ async def get_document(
     document_id: UUID,
     pipeline_id: UUID,
     request: Request,
+    _scope=Depends(require_scope("query")),
 ):
     """Return document status and chunk count within its tenant."""
     del request  # Redis is not needed for status lookup.
@@ -350,6 +415,7 @@ async def list_documents(
     pipeline_id: UUID,
     limit: int = 100,
     offset: int = 0,
+    _scope=Depends(require_scope("query")),
 ):
     """List documents for a given pipeline with status, chunk count, and metadata."""
     async with pipeline_connection(pipeline_id) as conn:
@@ -387,6 +453,7 @@ async def get_document_chunks(
     document_id: UUID,
     pipeline_id: UUID | None = None,
     limit: int = 100,
+    _scope=Depends(require_scope("query")),
 ):
     """Retrieve all chunks belonging to a document."""
     from db.pool import connection
@@ -425,7 +492,7 @@ async def get_document_chunks(
 
 
 @router.get("/chunks/{chunk_id}")
-async def get_chunk(chunk_id: UUID):
+async def get_chunk(chunk_id: UUID, _scope=Depends(require_scope("query"))):
     """Retrieve chunk details, content, and parent document metadata."""
     from db.pool import connection
     if connection is None:
