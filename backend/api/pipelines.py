@@ -552,8 +552,8 @@ async def get_pipeline_analytics(pipeline_id: UUID):
         daily_map = {str(r["run_date"]): int(r["query_count"]) for r in daily_rows}
         cost_map = {
             str(r["run_date"]): {
-                "avg_cost": round(float(r["avg_cost"]), 6) if r["avg_cost"] is not None else 0.0,
-                "total_cost": round(float(r["total_cost"]), 6) if r["total_cost"] is not None else 0.0,
+                "avg_cost": round(float(r["avg_cost"]), 6) if r["avg_cost"] is not None else None,
+                "total_cost": round(float(r["total_cost"]), 6) if r["total_cost"] is not None else None,
             }
             for r in daily_rows
         }
@@ -570,12 +570,13 @@ async def get_pipeline_analytics(pipeline_id: UUID):
             daily_counts.append(DailyQueryCount(date=date_str, count=cnt))
             total_30d += cnt
 
-            c_info = cost_map.get(date_str, {"avg_cost": 0.0, "total_cost": 0.0})
-            cost_trends.append({
-                "date": date_str,
-                "cost_per_query": c_info["avg_cost"],
-                "total_cost": c_info["total_cost"],
-            })
+            c_info = cost_map.get(date_str)
+            if c_info and c_info["avg_cost"] is not None:
+                cost_trends.append({
+                    "date": date_str,
+                    "cost_per_query": c_info["avg_cost"],
+                    "total_cost": c_info["total_cost"],
+                })
 
         # 4. Recent failed runs
         failed_rows = await conn.fetch(

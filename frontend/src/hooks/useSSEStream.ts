@@ -85,20 +85,22 @@ export function useSSEStream(initialRunId?: string | null): SSEStreamState {
           setStatus("retrieving");
         } else if (eventType === "retrieval_complete") {
           if (Array.isArray(payload.sources)) {
-            // Normalize sources
-            const formatted = payload.sources.map((s: any, idx: number) => {
-              if (typeof s === "string") {
-                return {
-                  source_index: idx + 1,
-                  chunk_id: `chunk-${idx}`,
-                  document_id: `doc-${idx}`,
-                  filename: s,
-                  score: 0.85,
-                };
-              }
-              return s;
-            });
-            setSources(formatted);
+            const validSources = payload.sources.filter(
+              (source: unknown): source is RetrievedSource =>
+                typeof source === "object" &&
+                source !== null &&
+                "source_index" in source &&
+                typeof source.source_index === "number" &&
+                "chunk_id" in source &&
+                typeof source.chunk_id === "string" &&
+                "document_id" in source &&
+                typeof source.document_id === "string" &&
+                "filename" in source &&
+                typeof source.filename === "string" &&
+                "score" in source &&
+                typeof source.score === "number"
+            );
+            setSources(validSources);
           }
           if (payload.retrieval_metadata) {
             setRetrievalMetadata(payload.retrieval_metadata);

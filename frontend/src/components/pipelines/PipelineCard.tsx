@@ -23,21 +23,10 @@ export function PipelineCard({
   const scoreColors = getScoreColor(overallScore);
 
   // 7-day query count
-  const runCount7d =
-    pipeline.latest_metrics?.run_count_7d ??
-    pipeline.latest_metrics?.run_count ??
-    0;
+  const runCount7d = pipeline.latest_metrics?.run_count_7d;
 
   // 7-day daily score trend for sparkline
-  const dailyScores =
-    pipeline.latest_metrics?.daily_scores_7d?.map((d) => d.score) || [
-      overallScore ? overallScore * 0.95 : 0.75,
-      overallScore ? overallScore * 0.98 : 0.8,
-      overallScore ? overallScore : 0.82,
-      overallScore ? overallScore * 1.02 : 0.85,
-      overallScore ? overallScore * 0.97 : 0.83,
-      overallScore ? overallScore : 0.86,
-    ];
+  const dailyScores = pipeline.latest_metrics?.daily_scores_7d?.map((d) => d.score) ?? [];
 
   return (
     <div className="rounded-2xl glass-panel p-6 border border-slate-800 hover:border-slate-700 transition-all duration-300 shadow-xl flex flex-col justify-between group">
@@ -83,7 +72,7 @@ export function PipelineCard({
               Queries (Last 7d)
             </span>
             <div className="text-lg font-bold font-mono text-slate-200">
-              {runCount7d}
+              {runCount7d ?? "--"}
             </div>
           </div>
 
@@ -98,13 +87,13 @@ export function PipelineCard({
         {/* Configuration summary tags */}
         <div className="flex flex-wrap items-center gap-1.5 mb-5 text-[11px] font-mono text-slate-400">
           <span className="px-2 py-0.5 rounded bg-slate-800/70 border border-slate-700/60">
-            Model: {pipeline.config.generation?.model_routing || "gpt-4o-mini"}
+            Model: {pipeline.config.generation?.model_routing || "Unavailable"}
           </span>
           <span className="px-2 py-0.5 rounded bg-slate-800/70 border border-slate-700/60">
-            Rerank: {pipeline.config.retrieval?.reranker || "cross-encoder"}
+            Rerank: {pipeline.config.retrieval?.reranker || "Unavailable"}
           </span>
           <span className="px-2 py-0.5 rounded bg-slate-800/70 border border-slate-700/60">
-            Top K: {pipeline.config.retrieval?.top_k_after_rerank || 5}
+            Top K: {pipeline.config.retrieval?.top_k_after_rerank ?? "Unavailable"}
           </span>
         </div>
       </div>

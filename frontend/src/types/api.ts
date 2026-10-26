@@ -115,7 +115,7 @@ export interface AnalyticsResponse {
   daily_query_counts: DailyQueryCount[];
   total_queries_30d: number;
   percentile_method: string;
-  cost_trends_30d?: { date: string; cost_per_query: number; total_cost: number }[];
+  cost_trends_30d?: { date: string; cost_per_query: number | null; total_cost: number | null }[];
   recent_failed_runs?: {
     run_id: string;
     query: string;

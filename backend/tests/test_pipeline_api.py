@@ -1,7 +1,7 @@
 """Unit and Integration tests for Pipeline CRUD, Versioning, History, Analytics, and Suggestions API."""
 
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
@@ -414,10 +414,25 @@ def test_pipeline_analytics_with_data(client):
             {"retrieval_latency_ms": 40, "latency_ms": 150, "input_tokens": 600, "output_tokens": 120, "cost_usd": 0.005},
             {"retrieval_latency_ms": 60, "latency_ms": 200, "input_tokens": 700, "output_tokens": 140, "cost_usd": 0.006},
         ],
-        # Daily query counts using correct column aliases (run_date, query_count)
+        # Daily counts include a day without recorded costs and a day with real cost data.
         [
-            {"run_date": datetime.now(timezone.utc).date(), "query_count": 3},
+            {
+                "run_date": datetime.now(timezone.utc).date() - timedelta(days=1),
+                "query_count": 2,
+                "avg_cost": None,
+                "total_cost": None,
+            },
+            {
+                "run_date": datetime.now(timezone.utc).date(),
+                "query_count": 3,
+                "avg_cost": 0.005,
+                "total_cost": 0.015,
+            },
         ],
+        # Recent failed runs
+        [],
+        # Daily evaluation scores
+        [],
     ]
 
     mock_mgr = _create_mock_db_context(mock_conn)
@@ -428,11 +443,17 @@ def test_pipeline_analytics_with_data(client):
         assert response.status_code == 200
         data = response.json()
         # AnalyticsResponse fields: total_queries_30d, retrieval_latency_p50, avg_generation_latency_ms, daily_query_counts
-        assert data["total_queries_30d"] == 3
+        assert data["total_queries_30d"] == 5
         assert data["retrieval_latency_p50"] == 40.0
         assert data["retrieval_latency_p95"] is not None
         assert data["avg_generation_latency_ms"] is not None
         assert data["daily_query_counts"] is not None
         # 30 days should be populated (filling 0-count days)
         assert len(data["daily_query_counts"]) == 30
-
+        assert data["cost_trends_30d"] == [
+            {
+                "date": datetime.now(timezone.utc).date().isoformat(),
+                "cost_per_query": 0.005,
+                "total_cost": 0.015,
+            }
+        ]

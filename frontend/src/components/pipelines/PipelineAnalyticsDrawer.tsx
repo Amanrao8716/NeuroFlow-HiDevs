@@ -32,7 +32,13 @@ export function PipelineAnalyticsDrawer({
   isOpen,
   onClose,
 }: PipelineAnalyticsDrawerProps) {
-  const { data: analytics } = useQuery({
+  const {
+    data: analytics,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: ["analytics", pipeline?.id],
     queryFn: () => (pipeline ? fetchPipelineAnalytics(pipeline.id) : null),
     enabled: Boolean(pipeline && isOpen),
@@ -44,57 +50,53 @@ export function PipelineAnalyticsDrawer({
   const latencyData = [
     {
       metric: "P50 (Median)",
-      latency: analytics?.retrieval_latency_p50 ?? 45,
+      latency: analytics?.retrieval_latency_p50 ?? null,
     },
     {
       metric: "P95",
-      latency: analytics?.retrieval_latency_p95 ?? 120,
+      latency: analytics?.retrieval_latency_p95 ?? null,
     },
     {
       metric: "P99",
-      latency: analytics?.retrieval_latency_p99 ?? 250,
+      latency: analytics?.retrieval_latency_p99 ?? null,
     },
   ];
+  const hasLatencyData = latencyData.some((item) => item.latency !== null);
 
   // 30-Day Cost Trend
-  const costTrendData =
-    analytics?.cost_trends_30d?.map((c) => ({
+  const costTrendData = (analytics?.cost_trends_30d ?? [])
+    .filter((cost) => typeof cost.cost_per_query === "number")
+    .map((c) => ({
       date: c.date.slice(5),
       cost: c.cost_per_query,
-    })) ||
-    Array.from({ length: 15 }, (_, i) => ({
-      date: `10-${10 + i}`,
-      cost: Number((0.0002 + Math.random() * 0.0004).toFixed(5)),
     }));
 
   // Radar Data for the 4 Evaluation Metrics
-  const evalScores = analytics?.avg_evaluation_scores || {
-    faithfulness: 0.88,
-    answer_relevance: 0.85,
-    context_precision: 0.82,
-    context_recall: 0.9,
-  };
-
+  const evalScores = analytics?.avg_evaluation_scores;
   const radarData = [
     {
       metric: "Faithfulness",
-      score: Math.round((evalScores.faithfulness ?? 0.85) * 100),
+      score: evalScores?.faithfulness,
     },
     {
       metric: "Relevance",
-      score: Math.round((evalScores.answer_relevance ?? 0.82) * 100),
+      score: evalScores?.answer_relevance,
     },
     {
       metric: "Precision",
-      score: Math.round((evalScores.context_precision ?? 0.78) * 100),
+      score: evalScores?.context_precision,
     },
     {
       metric: "Recall",
-      score: Math.round((evalScores.context_recall ?? 0.89) * 100),
+      score: evalScores?.context_recall,
     },
-  ];
+  ]
+    .filter((item): item is { metric: string; score: number } => typeof item.score === "number")
+    .map((item) => ({ ...item, score: Math.round(item.score * 100) }));
 
   const failedRuns = analytics?.recent_failed_runs || [];
+  const availableMetricCount = radarData.length;
+  const averageCost = analytics?.estimated_cost_per_query;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm transition-opacity">
@@ -122,6 +124,25 @@ export function PipelineAnalyticsDrawer({
           </button>
         </div>
 
+        {isLoading ? (
+          <div className="p-8 rounded-2xl bg-slate-950/70 border border-slate-800 text-center text-sm text-slate-400">
+            Loading pipeline analytics...
+          </div>
+        ) : isError ? (
+          <div className="p-8 rounded-2xl bg-rose-950/30 border border-rose-800/50 text-center space-y-3">
+            <p className="text-sm text-rose-300">
+              Unable to load pipeline analytics
+              {error instanceof Error ? `: ${error.message}` : "."}
+            </p>
+            <button
+              onClick={() => refetch()}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 border border-rose-800/60 text-xs text-rose-200 hover:bg-slate-800"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <>
         {/* Latency Percentiles (P50, P95, P99) */}
         <div className="p-5 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-3">
           <div className="flex items-center justify-between">
@@ -136,21 +157,27 @@ export function PipelineAnalyticsDrawer({
             </span>
           </div>
           <div className="h-44 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={latencyData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <XAxis dataKey="metric" stroke="#64748b" fontSize={11} />
-                <YAxis stroke="#64748b" fontSize={11} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: "#0f172a",
-                    border: "1px solid #334155",
-                    borderRadius: "8px",
-                    fontSize: "12px",
-                  }}
-                />
-                <Bar dataKey="latency" fill="#06b6d4" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {hasLatencyData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={latencyData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <XAxis dataKey="metric" stroke="#64748b" fontSize={11} />
+                  <YAxis stroke="#64748b" fontSize={11} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#0f172a",
+                      border: "1px solid #334155",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                    }}
+                  />
+                  <Bar dataKey="latency" fill="#06b6d4" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-xs text-slate-400">
+                No retrieval latency data available yet.
+              </div>
+            )}
           </div>
         </div>
 
@@ -164,12 +191,13 @@ export function PipelineAnalyticsDrawer({
               </h3>
             </div>
             <span className="text-[11px] font-mono text-emerald-400">
-              Avg: ${analytics?.estimated_cost_per_query ?? "0.0003"}
+              Avg: {averageCost === null || averageCost === undefined ? "Unavailable" : `$${averageCost}`}
             </span>
           </div>
           <div className="h-44 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={costTrendData} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
+            {costTrendData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={costTrendData} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
                 <defs>
                   <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
@@ -195,8 +223,13 @@ export function PipelineAnalyticsDrawer({
                   fillOpacity={1}
                   fill="url(#costGrad)"
                 />
-              </AreaChart>
-            </ResponsiveContainer>
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-xs text-slate-400">
+                No cost trend data available yet.
+              </div>
+            )}
           </div>
         </div>
 
@@ -211,20 +244,38 @@ export function PipelineAnalyticsDrawer({
             </div>
           </div>
           <div className="h-56 w-full flex items-center justify-center">
-            <ResponsiveContainer width="100%" height="100%">
-              <RadarChart data={radarData} outerRadius="75%">
-                <PolarGrid stroke="#334155" />
-                <PolarAngleAxis dataKey="metric" stroke="#94a3b8" fontSize={11} />
-                <PolarRadiusAxis angle={30} domain={[0, 100]} stroke="#475569" fontSize={10} />
-                <Radar
-                  name="Pipeline"
-                  dataKey="score"
-                  stroke="#8b5cf6"
-                  fill="#8b5cf6"
-                  fillOpacity={0.4}
-                />
-              </RadarChart>
-            </ResponsiveContainer>
+            {availableMetricCount === 4 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <RadarChart data={radarData} outerRadius="75%">
+                  <PolarGrid stroke="#334155" />
+                  <PolarAngleAxis dataKey="metric" stroke="#94a3b8" fontSize={11} />
+                  <PolarRadiusAxis angle={30} domain={[0, 100]} stroke="#475569" fontSize={10} />
+                  <Radar
+                    name="Pipeline"
+                    dataKey="score"
+                    stroke="#8b5cf6"
+                    fill="#8b5cf6"
+                    fillOpacity={0.4}
+                  />
+                </RadarChart>
+              </ResponsiveContainer>
+            ) : availableMetricCount > 0 ? (
+              <div className="w-full space-y-2 px-6">
+                <p className="text-center text-xs text-slate-400">
+                  {availableMetricCount} of 4 evaluation metrics available.
+                </p>
+                {radarData.map((item) => (
+                  <div key={item.metric} className="flex justify-between text-xs text-slate-300">
+                    <span>{item.metric}</span>
+                    <span className="font-mono">{item.score}%</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-xs text-slate-400">
+                No evaluation metrics available yet.
+              </div>
+            )}
           </div>
         </div>
 
@@ -263,10 +314,12 @@ export function PipelineAnalyticsDrawer({
             </div>
           ) : (
             <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-center text-xs text-slate-400 italic">
-              No failed runs logged for this pipeline. All recent executions completed successfully.
+              No failed runs recorded for this pipeline.
             </div>
           )}
         </div>
+          </>
+        )}
       </div>
     </div>
   );

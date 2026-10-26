@@ -54,6 +54,8 @@ export default function PlaygroundPage() {
   const [evalB, setEvalB] = useState<EvaluationItem | null>(null);
   const [isEvalLoadingA, setIsEvalLoadingA] = useState(false);
   const [isEvalLoadingB, setIsEvalLoadingB] = useState(false);
+  const [evalErrorA, setEvalErrorA] = useState<string | null>(null);
+  const [evalErrorB, setEvalErrorB] = useState<string | null>(null);
 
   // Pipelines list
   const { data: pipelines } = useQuery({
@@ -79,12 +81,15 @@ export default function PlaygroundPage() {
   useEffect(() => {
     if (streamA.status === "completed" && activeRunA && !evalA) {
       setIsEvalLoadingA(true);
+      setEvalErrorA(null);
       const timer = setTimeout(async () => {
         try {
           const res = await fetchRunEvaluation(activeRunA, selectedPipelineId || undefined);
           setEvalA(res);
-        } catch {
-          // Eval might still be processing in background
+        } catch (err) {
+          setEvalErrorA(
+            err instanceof Error ? err.message : "Evaluation could not be loaded."
+          );
         } finally {
           setIsEvalLoadingA(false);
         }
@@ -96,12 +101,15 @@ export default function PlaygroundPage() {
   useEffect(() => {
     if (streamB.status === "completed" && activeRunB && !evalB) {
       setIsEvalLoadingB(true);
+      setEvalErrorB(null);
       const timer = setTimeout(async () => {
         try {
           const res = await fetchRunEvaluation(activeRunB, comparePipelineId || undefined);
           setEvalB(res);
-        } catch {
-          // Eval might still be processing
+        } catch (err) {
+          setEvalErrorB(
+            err instanceof Error ? err.message : "Evaluation could not be loaded."
+          );
         } finally {
           setIsEvalLoadingB(false);
         }
@@ -123,6 +131,8 @@ export default function PlaygroundPage() {
     setIsSubmitting(true);
     setEvalA(null);
     setEvalB(null);
+    setEvalErrorA(null);
+    setEvalErrorB(null);
     setRatingA(null);
     setRatingB(null);
 
@@ -165,6 +175,26 @@ export default function PlaygroundPage() {
     }
   };
 
+  const handleRetryEvaluation = async (side: "A" | "B") => {
+    const runId = side === "A" ? activeRunA : activeRunB;
+    const pipelineId = side === "A" ? selectedPipelineId : comparePipelineId;
+    if (!runId) return;
+
+    const setLoading = side === "A" ? setIsEvalLoadingA : setIsEvalLoadingB;
+    const setError = side === "A" ? setEvalErrorA : setEvalErrorB;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await fetchRunEvaluation(runId, pipelineId || undefined);
+      if (side === "A") setEvalA(result);
+      else setEvalB(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Evaluation could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleOpenSourceDetail = async (source: RetrievedSource) => {
     if (source.content) {
       setActiveChunkDetail({
@@ -186,16 +216,7 @@ export default function PlaygroundPage() {
           score: source.score,
         });
       } catch {
-        setActiveChunkDetail({
-          chunk_id: source.chunk_id,
-          document_id: source.document_id,
-          content: `Content for ${source.filename} [Source ${source.source_index}]. Detailed chunk extraction is available.`,
-          chunk_index: source.source_index,
-          token_count: 120,
-          metadata: {},
-          filename: source.filename,
-          score: source.score,
-        });
+        addToast("error", `Unable to load source details for ${source.filename}.`);
       }
     }
   };
@@ -433,15 +454,7 @@ export default function PlaygroundPage() {
                             const full = await fetchChunk(c.chunk_id);
                             setActiveChunkDetail(full);
                           } catch {
-                            setActiveChunkDetail({
-                              chunk_id: c.chunk_id,
-                              document_id: "",
-                              content: c.content_preview || "Citation chunk preview",
-                              chunk_index: c.source_number,
-                              token_count: 50,
-                              metadata: {},
-                              filename: c.document_name || undefined,
-                            });
+                            addToast("error", `Unable to load details for ${c.reference}.`);
                           }
                         }
                       }}
@@ -505,25 +518,55 @@ export default function PlaygroundPage() {
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
                     <MetricGauge
                       label="Faithfulness"
-                      score={evalA?.faithfulness ?? (streamA.status === "completed" ? 0.88 : null)}
+                      score={evalA?.faithfulness}
                       size="sm"
                     />
                     <MetricGauge
                       label="Answer Relevance"
-                      score={evalA?.answer_relevance ?? (streamA.status === "completed" ? 0.85 : null)}
+                      score={evalA?.answer_relevance}
                       size="sm"
                     />
                     <MetricGauge
                       label="Context Precision"
-                      score={evalA?.context_precision ?? (streamA.status === "completed" ? 0.81 : null)}
+                      score={evalA?.context_precision}
                       size="sm"
                     />
                     <MetricGauge
                       label="Context Recall"
-                      score={evalA?.context_recall ?? (streamA.status === "completed" ? 0.90 : null)}
+                      score={evalA?.context_recall}
                       size="sm"
                     />
                   </div>
+                  {!isEvalLoadingA && evalErrorA && (
+                    <div className="flex items-center justify-between gap-3 text-xs text-rose-300">
+                      <span>Evaluation unavailable: {evalErrorA}</span>
+                      <button
+                        onClick={() => handleRetryEvaluation("A")}
+                        className="text-indigo-300 hover:text-indigo-200 underline"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                  {!isEvalLoadingA && !evalErrorA && !evalA && (
+                    <p className="text-xs text-slate-400">Evaluation has not been returned yet.</p>
+                  )}
+                  {evalA &&
+                    evalA.faithfulness === null &&
+                    evalA.answer_relevance === null &&
+                    evalA.context_precision === null &&
+                    evalA.context_recall === null && (
+                      <p className="text-xs text-slate-400">
+                        Evaluation completed without metric scores.
+                      </p>
+                    )}
+                  {evalA &&
+                    [evalA.faithfulness, evalA.answer_relevance, evalA.context_precision, evalA.context_recall]
+                      .some((score) => score === null) &&
+                    [evalA.faithfulness, evalA.answer_relevance, evalA.context_precision, evalA.context_recall]
+                      .some((score) => score !== null) && (
+                      <p className="text-xs text-slate-400">Some evaluation metrics are unavailable.</p>
+                    )}
                 </div>
               </div>
             )}
@@ -678,25 +721,55 @@ export default function PlaygroundPage() {
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
                       <MetricGauge
                         label="Faithfulness"
-                        score={evalB?.faithfulness ?? (streamB.status === "completed" ? 0.84 : null)}
+                        score={evalB?.faithfulness}
                         size="sm"
                       />
                       <MetricGauge
                         label="Answer Relevance"
-                        score={evalB?.answer_relevance ?? (streamB.status === "completed" ? 0.81 : null)}
+                        score={evalB?.answer_relevance}
                         size="sm"
                       />
                       <MetricGauge
                         label="Context Precision"
-                        score={evalB?.context_precision ?? (streamB.status === "completed" ? 0.79 : null)}
+                        score={evalB?.context_precision}
                         size="sm"
                       />
                       <MetricGauge
                         label="Context Recall"
-                        score={evalB?.context_recall ?? (streamB.status === "completed" ? 0.88 : null)}
+                        score={evalB?.context_recall}
                         size="sm"
                       />
                     </div>
+                    {!isEvalLoadingB && evalErrorB && (
+                      <div className="flex items-center justify-between gap-3 text-xs text-rose-300">
+                        <span>Evaluation unavailable: {evalErrorB}</span>
+                        <button
+                          onClick={() => handleRetryEvaluation("B")}
+                          className="text-purple-300 hover:text-purple-200 underline"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    )}
+                    {!isEvalLoadingB && !evalErrorB && !evalB && (
+                      <p className="text-xs text-slate-400">Evaluation has not been returned yet.</p>
+                    )}
+                    {evalB &&
+                      evalB.faithfulness === null &&
+                      evalB.answer_relevance === null &&
+                      evalB.context_precision === null &&
+                      evalB.context_recall === null && (
+                        <p className="text-xs text-slate-400">
+                          Evaluation completed without metric scores.
+                        </p>
+                      )}
+                    {evalB &&
+                      [evalB.faithfulness, evalB.answer_relevance, evalB.context_precision, evalB.context_recall]
+                        .some((score) => score === null) &&
+                      [evalB.faithfulness, evalB.answer_relevance, evalB.context_precision, evalB.context_recall]
+                        .some((score) => score !== null) && (
+                        <p className="text-xs text-slate-400">Some evaluation metrics are unavailable.</p>
+                      )}
                   </div>
                 </div>
               )}
