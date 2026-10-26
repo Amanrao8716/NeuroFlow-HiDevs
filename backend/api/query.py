@@ -6,10 +6,12 @@ import asyncio
 from dataclasses import asdict
 import json
 import logging
+import time
 from typing import Any, AsyncGenerator
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from observability.metrics import QUERY_LATENCY, QUERY_TOTAL
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -25,12 +27,22 @@ def get_generation_pipeline(request: Request | None = None) -> GenerationPipelin
     """Obtain or initialize the GenerationPipeline singleton."""
     global _pipeline_instance
     redis_client = getattr(request.app.state, "redis", None) if request and hasattr(request, "app") else None
+    circuit_breakers = (
+        getattr(request.app.state, "circuit_breakers", None)
+        if request and hasattr(request, "app")
+        else None
+    )
     if _pipeline_instance is None:
         _pipeline_instance = GenerationPipeline(redis_client=redis_client)
+        if _pipeline_instance.client:
+            _pipeline_instance.client.circuit_breakers = circuit_breakers
     elif _pipeline_instance.client is None and redis_client is not None:
         from providers.client import NeuroFlowClient
         _pipeline_instance.redis = redis_client
-        _pipeline_instance.client = NeuroFlowClient(redis_client)
+        _pipeline_instance.client = NeuroFlowClient(
+            redis_client,
+            circuit_breakers=circuit_breakers,
+        )
     return _pipeline_instance
 
 
@@ -103,6 +115,7 @@ async def post_query(request: QueryRequest, req: Request):
     run_id = uuid4()
 
     if not request.stream:
+        started = time.perf_counter()
         try:
             result: GenerationResult = await pipeline.generate(
                 query=request.query,
@@ -113,6 +126,8 @@ async def post_query(request: QueryRequest, req: Request):
                 rerank=request.rerank,
                 pipeline_version=request.pipeline_version,
             )
+            QUERY_TOTAL.labels(status=result.status).inc()
+            QUERY_LATENCY.observe(time.perf_counter() - started)
             return QueryResponse(
                 run_id=result.run_id,
                 query=result.query,
@@ -130,6 +145,8 @@ async def post_query(request: QueryRequest, req: Request):
                 status=result.status,
             )
         except Exception as exc:
+            QUERY_TOTAL.labels(status="failed").inc()
+            QUERY_LATENCY.observe(time.perf_counter() - started)
             logger.exception("Query generation failed: %s", exc)
             raise HTTPException(status_code=500, detail=f"Generation failed: {str(exc)}") from exc
 
@@ -168,6 +185,8 @@ async def get_query_stream(run_id: UUID, req: Request):
     rerank = stream_info["rerank"]
 
     async def event_generator() -> AsyncGenerator[dict[str, Any], None]:
+        started = time.perf_counter()
+        query_status = "completed"
         try:
             async for event in pipeline.stream_events(
                 query=query,
@@ -177,12 +196,22 @@ async def get_query_stream(run_id: UUID, req: Request):
                 max_context_tokens=max_context_tokens,
                 rerank=rerank,
             ):
+                if event.get("type") == "error":
+                    query_status = "failed"
                 # Yield SSE data as JSON string
                 yield {
                     "event": "message",
                     "data": json.dumps(event),
                 }
+        except asyncio.CancelledError:
+            query_status = "cancelled"
+            raise
+        except Exception:
+            query_status = "failed"
+            raise
         finally:
+            QUERY_TOTAL.labels(status=query_status).inc()
+            QUERY_LATENCY.observe(time.perf_counter() - started)
             # Clean up active stream registration
             _active_streams.pop(run_id_str, None)
 

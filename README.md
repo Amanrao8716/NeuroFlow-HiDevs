@@ -28,6 +28,7 @@ docs/          Architecture, API contracts, data models, and ADRs
 - [System architecture](docs/architecture.md)
 - [REST API contracts](docs/api-contracts.md)
 - [Data models](docs/data-models.md)
+- [Operational observability](docs/observability.md)
 - [ADR 001 — Vector store](docs/adr/001-vector-store.md)
 - [ADR 002 — Chunking strategy](docs/adr/002-chunking-strategy.md)
 - [ADR 003 — Evaluation framework](docs/adr/003-evaluation-framework.md)
@@ -428,4 +429,3 @@ npm run dev
 npm run build
 npm run start
 ```
-

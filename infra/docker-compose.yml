@@ -72,6 +72,8 @@ services:
       REDIS_HOST: redis
       MLFLOW_TRACKING_URI: http://mlflow:5000
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OBSERVABILITY_SERVICE_TOKEN: ${OBSERVABILITY_SERVICE_TOKEN:?Set OBSERVABILITY_SERVICE_TOKEN in .env}
+      NEUROFLOW_API_URL: http://api:8000
     
     depends_on:
       postgres:
@@ -95,6 +97,10 @@ services:
       REDIS_HOST: redis
       MLFLOW_TRACKING_URI: http://mlflow:5000
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OBSERVABILITY_SERVICE_TOKEN: ${OBSERVABILITY_SERVICE_TOKEN:?Set OBSERVABILITY_SERVICE_TOKEN in .env}
+      NEUROFLOW_API_URL: http://api:8000
+    expose:
+      - "8001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,7 +114,41 @@ services:
       - "4317:4317"
       - "4318:4318"
 
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      api:
+        condition: service_started
+      worker:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    ports:
+      - "3000:3000"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-neuroflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - postgres
+
 volumes:
   postgres_data:
   mlflow_artifacts:
-
+  prometheus_data:
+  grafana_data:

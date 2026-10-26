@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 try:
     from db.pool import pipeline_connection, connection
 except ImportError:
@@ -26,6 +29,7 @@ from evaluation.metrics.faithfulness import FaithfulnessMetric, FaithfulnessScor
 from providers.router import RoutingCriteria
 
 logger = logging.getLogger("neuroflow.evaluation.judge")
+tracer = trace.get_tracer("neuroflow.evaluation")
 
 DEFAULT_WEIGHTS = {
     "faithfulness": 0.35,
@@ -115,10 +119,47 @@ class EvaluationJudge:
         judge_model = await self._resolve_judge_model_name()
 
         # 2. Run metrics concurrently using asyncio.gather
-        faith_task = self.faithfulness_metric.score(answer=answer, context=context, query=query)
-        rel_task = self.answer_relevance_metric.score(query=query, answer=answer, context=context)
-        prec_task = self.context_precision_metric.score(query=query, context=context, answer=answer)
-        rec_task = self.context_recall_metric.score(query=query, context=context, answer=answer)
+        async def score_with_span(name: str, operation):
+            with tracer.start_as_current_span(name) as span:
+                try:
+                    return await operation
+                except Exception as exc:
+                    span.record_exception(exc)
+                    span.set_status(Status(StatusCode.ERROR, str(exc)))
+                    raise
+
+        faith_task = score_with_span(
+            "evaluation.faithfulness",
+            self.faithfulness_metric.score(
+                answer=answer,
+                context=context,
+                query=query,
+            ),
+        )
+        rel_task = score_with_span(
+            "evaluation.answer_relevance",
+            self.answer_relevance_metric.score(
+                query=query,
+                answer=answer,
+                context=context,
+            ),
+        )
+        prec_task = score_with_span(
+            "evaluation.context_precision",
+            self.context_precision_metric.score(
+                query=query,
+                context=context,
+                answer=answer,
+            ),
+        )
+        rec_task = score_with_span(
+            "evaluation.context_recall",
+            self.context_recall_metric.score(
+                query=query,
+                context=context,
+                answer=answer,
+            ),
+        )
 
         faith_res, rel_res, prec_res, rec_res = await asyncio.gather(
             faith_task, rel_task, prec_task, rec_task
@@ -133,6 +174,10 @@ class EvaluationJudge:
             + w["context_recall"] * rec_res.score
         )
         overall_score = round(max(0.0, min(1.0, overall_raw)), 4)
+        trace.get_current_span().set_attribute(
+            "evaluation.overall_score",
+            overall_score,
+        )
         is_training_candidate = overall_score > training_threshold
 
         report = EvaluationReport(

@@ -357,6 +357,24 @@ class TestCircuitBreaker:
         return CircuitBreaker(r, "test", **kwargs), r
 
     @pytest.mark.asyncio
+    async def test_trip_metric_increments_only_when_breaker_opens(self):
+        from observability.metrics import CIRCUIT_BREAKER_TRIPS
+
+        counter = CIRCUIT_BREAKER_TRIPS.labels(provider="test")
+        before = counter._value.get()
+        cb, _ = self._make_cb(failure_threshold=1)
+
+        with pytest.raises(ValueError):
+            async with cb:
+                raise ValueError("provider failure")
+
+        with pytest.raises(CircuitOpenError):
+            async with cb:
+                pass
+
+        assert counter._value.get() == before + 1
+
+    @pytest.mark.asyncio
     async def test_initially_closed(self):
         cb, _ = self._make_cb()
         state = await cb.state()

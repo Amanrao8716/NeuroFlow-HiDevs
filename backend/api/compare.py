@@ -15,6 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from observability.metrics import QUERY_LATENCY, QUERY_TOTAL
 from pipelines.generation.generator import GenerationPipeline
 
 try:
@@ -33,12 +34,22 @@ def get_generation_pipeline(request: Request | None = None) -> GenerationPipelin
     """Obtain or initialize the GenerationPipeline singleton."""
     global _pipeline_instance
     redis_client = getattr(request.app.state, "redis", None) if request and hasattr(request, "app") else None
+    circuit_breakers = (
+        getattr(request.app.state, "circuit_breakers", None)
+        if request and hasattr(request, "app")
+        else None
+    )
     if _pipeline_instance is None:
         _pipeline_instance = GenerationPipeline(redis_client=redis_client)
+        if _pipeline_instance.client:
+            _pipeline_instance.client.circuit_breakers = circuit_breakers
     elif _pipeline_instance.client is None and redis_client is not None:
         from providers.client import NeuroFlowClient
         _pipeline_instance.redis = redis_client
-        _pipeline_instance.client = NeuroFlowClient(redis_client)
+        _pipeline_instance.client = NeuroFlowClient(
+            redis_client,
+            circuit_breakers=circuit_breakers,
+        )
     return _pipeline_instance
 
 
@@ -119,6 +130,8 @@ async def _execute_single_pipeline(
             pipeline_id=pipeline_id,
             pipeline_version=version,
         )
+        QUERY_TOTAL.labels(status=gen_result.status).inc()
+        QUERY_LATENCY.observe(time.perf_counter() - start_time)
 
         total_latency = float(gen_result.latency_ms) if gen_result.latency_ms is not None else round((time.perf_counter() - start_time) * 1000.0, 2)
         retrieval_lat = float(gen_result.retrieval_latency_ms) if gen_result.retrieval_latency_ms is not None else None
@@ -169,6 +182,8 @@ async def _execute_single_pipeline(
         )
     except Exception as exc:
         total_latency = round((time.perf_counter() - start_time) * 1000.0, 2)
+        QUERY_TOTAL.labels(status="failed").inc()
+        QUERY_LATENCY.observe(time.perf_counter() - start_time)
         logger.exception("Pipeline %s execution raised an exception: %s", pipeline_id, exc)
         return PipelineComparisonResult(
             pipeline_id=pipeline_id,

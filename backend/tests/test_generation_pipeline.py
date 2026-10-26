@@ -34,7 +34,7 @@ def mock_pipeline_components():
         page_number=1,
         metadata={},
     )
-    ret.retrieve_parallel = AsyncMock(return_value=([chunk1], [], None))
+    ret.retrieve_parallel = AsyncMock(return_value=([chunk1], [], []))
 
     reranker = MagicMock()
     reranker.rerank = AsyncMock(return_value=[chunk1])

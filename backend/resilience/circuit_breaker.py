@@ -38,6 +38,11 @@ from contextlib import asynccontextmanager
 from enum import Enum
 from typing import AsyncGenerator
 
+from observability.metrics import (
+    CIRCUIT_BREAKER_TRIPS,
+    set_circuit_breaker_state,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -272,8 +277,11 @@ class CircuitBreaker:
             )
             # 'still_open' means recovery timeout hasn't elapsed yet → stay OPEN
             if result == "still_open":
+                set_circuit_breaker_state(self._name, True)
                 return CircuitState.OPEN
             s = result or s
+            if s == CircuitState.HALF_OPEN:
+                set_circuit_breaker_state(self._name, False)
         # Guard against any unexpected values returned by the Lua sim
         try:
             return CircuitState(s)
@@ -286,6 +294,10 @@ class CircuitBreaker:
         raw_state = await self._redis.get(self._k_state)
         raw_count = await self._redis.get(self._k_count)
         raw_opened = await self._redis.get(self._k_opened)
+        set_circuit_breaker_state(
+            self._name,
+            (raw_state or CircuitState.CLOSED) == CircuitState.OPEN,
+        )
         return {
             "name": self._name,
             "state": raw_state or CircuitState.CLOSED,
@@ -310,16 +322,19 @@ class CircuitBreaker:
         now = time.time()
 
         # Possibly transition OPEN -> HALF_OPEN
-        await self._run_script(
+        transition = await self._run_script(
             self._sha_try_half_open,  # type: ignore[arg-type]
             [self._k_state, self._k_opened, self._k_required, self._k_inflight],
             [now, self._recovery_timeout, self._half_open_max],
         )
+        if transition == CircuitState.HALF_OPEN:
+            set_circuit_breaker_state(self._name, False)
 
         raw_state = await self._redis.get(self._k_state)
         state = CircuitState(raw_state or "closed")
 
         if state == CircuitState.OPEN:
+            set_circuit_breaker_state(self._name, True)
             raw_opened = await self._redis.get(self._k_opened)
             opened_at = float(raw_opened) if raw_opened else now
             retry_after = max(0.0, self._recovery_timeout - (now - opened_at))
@@ -341,7 +356,7 @@ class CircuitBreaker:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is asyncio.CancelledError:
+        if exc_type in (asyncio.CancelledError, GeneratorExit):
             # Cancellation is not a provider failure.  Release the half-open
             # slot if we had one, but do not modify the failure counter.
             if self._current_state == CircuitState.HALF_OPEN:
@@ -354,11 +369,14 @@ class CircuitBreaker:
 
         if exc_type is not None:
             # Any other exception counts as a failure.
-            await self._run_script(
+            transition = await self._run_script(
                 self._sha_failure,  # type: ignore[arg-type]
                 [self._k_state, self._k_count, self._k_opened, self._k_inflight],
                 [self._threshold, time.time()],
             )
+            if transition in ("opened", "reopened"):
+                CIRCUIT_BREAKER_TRIPS.labels(provider=self._name).inc()
+                set_circuit_breaker_state(self._name, True)
             logger.warning(
                 "circuit_breaker name=%s recorded failure exc=%s",
                 self._name,
@@ -367,11 +385,13 @@ class CircuitBreaker:
             return False  # re-raise the exception
 
         # Success
-        await self._run_script(
+        transition = await self._run_script(
             self._sha_success,  # type: ignore[arg-type]
             [self._k_state, self._k_count, self._k_inflight, self._k_required],
             [self._half_open_max],
         )
+        if transition == "closed":
+            set_circuit_breaker_state(self._name, False)
         return False
 
 

@@ -9,6 +9,8 @@ import logging
 from typing import Any, Callable
 from uuid import UUID
 
+from opentelemetry import trace
+
 try:
     from db.pool import get_pool, pipeline_connection
 except ImportError:
@@ -17,6 +19,16 @@ except ImportError:
 from pipelines.retrieval.query_processor import ProcessedQuery, QueryProcessor
 
 logger = logging.getLogger("neuroflow.retrieval.retriever")
+tracer = trace.get_tracer("neuroflow.retrieval")
+
+
+async def _traced_search(name: str, operation):
+    with tracer.start_as_current_span(name) as span:
+        try:
+            return await operation
+        except Exception as exc:
+            span.record_exception(exc)
+            raise
 
 
 @dataclass
@@ -124,28 +136,36 @@ class HybridRetriever:
 
         # 1. Prepare dense query vectors
         embed_fn = await self._get_embed_fn()
-        try:
-            query_vectors = await embed_fn(queries_to_embed)
-        except Exception as exc:
-            logger.warning("Query embedding generation failed: %s", exc)
-            query_vectors = []
+        with tracer.start_as_current_span("retrieval.query_embedding") as span:
+            span.set_attribute("embedding.query_count", len(queries_to_embed))
+            try:
+                query_vectors = await embed_fn(queries_to_embed)
+            except Exception as exc:
+                logger.warning("Query embedding generation failed: %s", exc)
+                span.record_exception(exc)
+                query_vectors = []
 
         primary_vector = query_vectors[0] if query_vectors else None
 
         # 2. Concurrently run retrieval branches
-        dense_task = self._dense_search(
-            query_vectors, k=k, pipeline_id=pipeline_id
+        dense_task = _traced_search(
+            "retrieval.dense",
+            self._dense_search(query_vectors, k=k, pipeline_id=pipeline_id),
         )
-        sparse_task = self._sparse_search(
-            processed.query, k=k, pipeline_id=pipeline_id
+        sparse_task = _traced_search(
+            "retrieval.sparse",
+            self._sparse_search(processed.query, k=k, pipeline_id=pipeline_id),
         )
 
         if active_filters:
-            meta_task = self._metadata_search(
-                active_filters,
-                query_vector=primary_vector,
-                k=k,
-                pipeline_id=pipeline_id,
+            meta_task = _traced_search(
+                "retrieval.metadata",
+                self._metadata_search(
+                    active_filters,
+                    query_vector=primary_vector,
+                    k=k,
+                    pipeline_id=pipeline_id,
+                ),
             )
             dense_res, sparse_res, meta_res = await asyncio.gather(
                 dense_task, sparse_task, meta_task, return_exceptions=False

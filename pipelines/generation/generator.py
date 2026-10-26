@@ -10,6 +10,8 @@ import time
 from typing import Any, AsyncGenerator
 from uuid import UUID, uuid4
 
+from opentelemetry import trace
+
 try:
     from db.pool import pipeline_connection
 except ImportError:
@@ -26,8 +28,10 @@ from pipelines.retrieval import (
 from pipelines.retrieval.context_assembler import TokenCounter
 from providers.base import ChatMessage
 from providers.client import NeuroFlowClient
+from observability.tracing import inject_trace_context
 
 logger = logging.getLogger("neuroflow.generation")
+tracer = trace.get_tracer("neuroflow.generation")
 
 
 @dataclass
@@ -266,6 +270,7 @@ class GenerationPipeline:
                 "run_id": run_id,
                 "pipeline_id": pipeline_id,
                 "enqueued_at": time.time(),
+                "trace_context": inject_trace_context(),
             })
             # Push into evaluation queue with non-blocking call
             await asyncio.wait_for(
@@ -338,26 +343,28 @@ class GenerationPipeline:
         retrieval_start = time.perf_counter()
 
         # 1. Query Processing
-        if apply_expansion:
-            processed = await self.processor.process(query)
-        else:
-            from pipelines.retrieval.query_processor import ProcessedQuery
-            processed = ProcessedQuery(
-                query=query,
-                query_type="factual",
-                expanded_queries=[query],
-                filters={},
-            )
+        with tracer.start_as_current_span("query.processing"):
+            if apply_expansion:
+                processed = await self.processor.process(query)
+            else:
+                from pipelines.retrieval.query_processor import ProcessedQuery
+                processed = ProcessedQuery(
+                    query=query,
+                    query_type="factual",
+                    expanded_queries=[query],
+                    filters={},
+                )
 
         # 2. Parallel Multi-Method Retrieval
         filters_to_apply = processed.filters if apply_filters else None
         retrieval_k = max(effective_dense_k, effective_sparse_k)
-        dense_res, sparse_res, meta_res = await self.retriever.retrieve_parallel(
-            query=processed,
-            k=retrieval_k,
-            pipeline_id=pipeline_id,
-            filters=filters_to_apply,
-        )
+        with tracer.start_as_current_span("retrieval.hybrid"):
+            dense_res, sparse_res, meta_res = await self.retriever.retrieve_parallel(
+                query=processed,
+                k=retrieval_k,
+                pipeline_id=pipeline_id,
+                filters=filters_to_apply,
+            )
 
         # 3. Reciprocal Rank Fusion
         result_lists = [dense_res, sparse_res]
@@ -368,7 +375,12 @@ class GenerationPipeline:
         # 4. Optional Reranking
         if reranker_type != "none" and fused:
             try:
-                candidates = await self.reranker.rerank(processed.query, fused, top_n=40)
+                with tracer.start_as_current_span("retrieval.rerank"):
+                    candidates = await self.reranker.rerank(
+                        processed.query,
+                        fused,
+                        top_n=40,
+                    )
             except Exception as rerank_err:
                 logger.warning("Reranking failed, using RRF candidates: %s", rerank_err)
                 candidates = fused
@@ -378,16 +390,21 @@ class GenerationPipeline:
         top_candidates = candidates[:effective_top_k]
 
         # 5. Context Assembly
-        assembled = self.assembler.assemble(top_candidates, max_tokens=effective_max_tokens)
+        with tracer.start_as_current_span("generation.context_assembly"):
+            assembled = self.assembler.assemble(
+                top_candidates,
+                max_tokens=effective_max_tokens,
+            )
         retrieval_latency_ms = int((time.perf_counter() - retrieval_start) * 1000)
 
         # 6. Prompt Assembly
-        prompt = self.prompt_builder.build(
-            query=processed.query,
-            query_type=processed.query_type,
-            context=assembled,
-            pipeline_config=cfg_dict,
-        )
+        with tracer.start_as_current_span("generation.prompt_assembly"):
+            prompt = self.prompt_builder.build(
+                query=processed.query,
+                query_type=processed.query_type,
+                context=assembled,
+                pipeline_config=cfg_dict,
+            )
 
         # Convert chunk IDs to UUIDs for DB schema compatibility
         retrieved_uuids: list[UUID] = []
@@ -505,13 +522,15 @@ class GenerationPipeline:
 
         try:
             # 2. Query processing & Retrieval
-            processed = await self.processor.process(query)
-            dense_res, sparse_res, meta_res = await self.retriever.retrieve_parallel(
-                query=processed,
-                k=top_k * 2,
-                pipeline_id=pipeline_id,
-                filters=processed.filters,
-            )
+            with tracer.start_as_current_span("query.processing"):
+                processed = await self.processor.process(query)
+            with tracer.start_as_current_span("retrieval.hybrid"):
+                dense_res, sparse_res, meta_res = await self.retriever.retrieve_parallel(
+                    query=processed,
+                    k=top_k * 2,
+                    pipeline_id=pipeline_id,
+                    filters=processed.filters,
+                )
 
             result_lists = [dense_res, sparse_res]
             if meta_res:
@@ -520,7 +539,12 @@ class GenerationPipeline:
 
             if rerank and fused:
                 try:
-                    candidates = await self.reranker.rerank(processed.query, fused, top_n=40)
+                    with tracer.start_as_current_span("retrieval.rerank"):
+                        candidates = await self.reranker.rerank(
+                            processed.query,
+                            fused,
+                            top_n=40,
+                        )
                 except Exception as rerank_err:
                     logger.warning("Reranking failed: %s", rerank_err)
                     candidates = fused
@@ -528,7 +552,11 @@ class GenerationPipeline:
                 candidates = fused
 
             top_candidates = candidates[:top_k]
-            assembled = self.assembler.assemble(top_candidates, max_tokens=max_context_tokens)
+            with tracer.start_as_current_span("generation.context_assembly"):
+                assembled = self.assembler.assemble(
+                    top_candidates,
+                    max_tokens=max_context_tokens,
+                )
 
             # 3. Event: retrieval_complete
             yield {
@@ -550,11 +578,12 @@ class GenerationPipeline:
             }
 
             # 4. Prompt Assembly
-            prompt = self.prompt_builder.build(
-                query=processed.query,
-                query_type=processed.query_type,
-                context=assembled,
-            )
+            with tracer.start_as_current_span("generation.prompt_assembly"):
+                prompt = self.prompt_builder.build(
+                    query=processed.query,
+                    query_type=processed.query_type,
+                    context=assembled,
+                )
 
             retrieved_uuids: list[UUID] = []
             for s in assembled.sources:

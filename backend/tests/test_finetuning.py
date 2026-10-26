@@ -409,7 +409,10 @@ async def test_job_manager_rejects_insufficient_samples():
     mock_conn = AsyncMock()
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    manager = FinetuneJobManager(extractor=mock_extractor)
+    manager = FinetuneJobManager(
+        extractor=mock_extractor,
+        openai_client=MagicMock(),
+    )
 
     with patch("pipelines.finetuning.job_manager.connection", mock_mgr):
         result = await manager.create_and_submit_job(base_model="gpt-4o-mini")

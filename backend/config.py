@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     # OpenTelemetry
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
 
+    # Internal observability API
+    observability_service_token: str | None = None
+    neuroflow_api_url: str = "http://localhost:8000"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

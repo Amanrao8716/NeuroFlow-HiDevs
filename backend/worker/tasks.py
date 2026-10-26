@@ -2,15 +2,27 @@
 """Background tasks for document ingestion."""
 
 from datetime import datetime, timezone
+import asyncio
 import json
 import logging
 import time
 from typing import Any
 from uuid import UUID
 
+import httpx
 from opentelemetry import trace
+from prometheus_client import start_http_server
+from redis.exceptions import RedisError
 
+from config import settings
 from db.pool import connection, pipeline_connection
+from observability.metrics import (
+    EVALUATION_JOBS,
+    INGESTION_DOCUMENTS,
+    QUEUE_DEPTH,
+)
+from observability.tracing import configure_tracing, extract_trace_context
+from resilience.circuit_breaker import CircuitBreakerRegistry
 from pipelines.ingestion.csv_extractor import extract_csv
 from pipelines.ingestion.docx_extractor import extract_docx
 from pipelines.ingestion.image_extractor import extract_image
@@ -29,6 +41,19 @@ async def startup(ctx):
     from db.pool import open_pool
 
     await open_pool()
+    configure_tracing(
+        f"{settings.app_name}-worker",
+        settings.otel_exporter_otlp_endpoint,
+        settings.app_env,
+    )
+    ctx["circuit_breakers"] = CircuitBreakerRegistry(ctx["redis"])
+    ctx["metrics_server"], ctx["metrics_thread"] = start_http_server(8001)
+    ctx["evaluation_consumer_task"] = asyncio.create_task(
+        _evaluation_queue_consumer(ctx)
+    )
+    ctx["evaluation_metrics_task"] = asyncio.create_task(
+        _evaluation_metrics_refresher()
+    )
     logger.info("Ingestion worker started.")
 
 
@@ -36,8 +61,102 @@ async def shutdown(ctx):
     """Release worker resources."""
     from db.pool import close_pool
 
+    consumer = ctx.get("evaluation_consumer_task")
+    if consumer:
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+    metrics_task = ctx.get("evaluation_metrics_task")
+    if metrics_task:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            pass
+    metrics_server = ctx.get("metrics_server")
+    if metrics_server:
+        metrics_server.shutdown()
+        metrics_server.server_close()
     await close_pool()
     logger.info("Ingestion worker stopped.")
+
+
+async def _evaluation_queue_consumer(ctx):
+    """Consume legacy evaluation-list messages and run each evaluation once."""
+    redis = ctx["redis"]
+    queue_key = "neuroflow:queue:evaluations"
+    try:
+        QUEUE_DEPTH.labels(queue="evaluation").set(await redis.llen(queue_key))
+    except (RedisError, OSError, TimeoutError):
+        logger.exception("Could not read the evaluation queue depth.")
+    while True:
+        try:
+            item = await redis.blpop(queue_key, timeout=1)
+        except (RedisError, OSError, TimeoutError):
+            logger.exception("Evaluation queue read failed; retrying shortly.")
+            await asyncio.sleep(1)
+            continue
+        if item is None:
+            continue
+        _, raw_message = item
+        payload = None
+        try:
+            payload = json.loads(raw_message)
+            if not isinstance(payload, dict):
+                raise ValueError("Evaluation queue message must be a JSON object.")
+            await evaluate_pipeline_run(
+                ctx,
+                payload["run_id"],
+                payload["pipeline_id"],
+                trace_context=payload.get("trace_context"),
+            )
+        except asyncio.CancelledError:
+            await redis.lpush(queue_key, raw_message)
+            raise
+        except Exception:
+            if payload is None:
+                logger.exception("Discarding malformed evaluation queue message.")
+            else:
+                attempt = int(payload.get("attempt", 0)) + 1
+                if attempt < 3:
+                    payload["attempt"] = attempt
+                    await redis.rpush(queue_key, json.dumps(payload))
+                    logger.exception(
+                        "Evaluation job failed; retry %s/2 queued.",
+                        attempt,
+                    )
+                    await asyncio.sleep(min(2**attempt, 30))
+                else:
+                    logger.exception("Evaluation job failed after %s attempts.", attempt)
+        finally:
+            try:
+                QUEUE_DEPTH.labels(queue="evaluation").set(
+                    await redis.llen(queue_key)
+                )
+            except (RedisError, OSError, TimeoutError):
+                logger.exception("Could not refresh the evaluation queue depth.")
+
+
+async def _evaluation_metrics_refresher():
+    """Keep rolling evaluation gauges current for pipelines seen by this worker."""
+    from observability.quality import (
+        known_pipeline_ids,
+        refresh_rolling_evaluation_metrics,
+    )
+
+    while True:
+        for pipeline_id in known_pipeline_ids():
+            try:
+                async with pipeline_connection(UUID(pipeline_id)) as conn:
+                    await refresh_rolling_evaluation_metrics(conn, pipeline_id)
+            except Exception:
+                logger.exception(
+                    "Could not refresh persisted evaluation metrics for pipeline %s.",
+                    pipeline_id,
+                )
+        await asyncio.sleep(60)
 
 
 async def process_document(ctx, document_id: str, pipeline_id: str):
@@ -46,9 +165,15 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
     doc_id = UUID(document_id)
     tenant_id = UUID(pipeline_id)
     redis = ctx["redis"]
-    client = NeuroFlowClient(redis)
+    client = NeuroFlowClient(
+        redis,
+        circuit_breakers=ctx.get("circuit_breakers"),
+    )
     page_count = 0
     embedding_calls = 0
+    QUEUE_DEPTH.labels(queue="ingestion").set(
+        await redis.llen("queue:ingest")
+    )
 
     with tracer.start_as_current_span("ingestion.process") as span:
         span.set_attribute("document_id", document_id)
@@ -86,22 +211,23 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
 
             span.set_attribute("source_type", source_type)
 
-            if source_type == "url":
-                pages = await extract_url(metadata["url"])
-            elif source_type == "pdf":
-                pages = extract_pdf(source_bytes)
-                for page in pages:
-                    page.metadata["page_count"] = len(
-                        {p.page_number for p in pages if p.content_type == "text"}
-                    )
-            elif source_type == "docx":
-                pages = extract_docx(source_bytes)
-            elif source_type == "csv":
-                pages = extract_csv(source_bytes)
-            elif source_type == "image":
-                pages = await extract_image(source_bytes, client)
-            else:
-                raise ValueError(f"Unsupported source type: {source_type}")
+            with tracer.start_as_current_span("ingestion.extract"):
+                if source_type == "url":
+                    pages = await extract_url(metadata["url"])
+                elif source_type == "pdf":
+                    pages = extract_pdf(source_bytes)
+                    for page in pages:
+                        page.metadata["page_count"] = len(
+                            {p.page_number for p in pages if p.content_type == "text"}
+                        )
+                elif source_type == "docx":
+                    pages = extract_docx(source_bytes)
+                elif source_type == "csv":
+                    pages = extract_csv(source_bytes)
+                elif source_type == "image":
+                    pages = await extract_image(source_bytes, client)
+                else:
+                    raise ValueError(f"Unsupported source type: {source_type}")
 
             if not pages:
                 raise ValueError("No content could be extracted.")
@@ -109,11 +235,12 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
             page_count = len(pages)
             span.set_attribute("page_count", page_count)
 
-            chunks = await chunk_pages(
-                pages,
-                embed=client.embed,
-                strategy="auto",
-            )
+            with tracer.start_as_current_span("ingestion.chunk"):
+                chunks = await chunk_pages(
+                    pages,
+                    embed=client.embed,
+                    strategy="auto",
+                )
 
             if not chunks:
                 raise ValueError("No chunks were produced.")
@@ -123,9 +250,11 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
             batch_size = 64
             for start in range(0, len(chunks), batch_size):
                 batch = chunks[start:start + batch_size]
-                vectors = await client.embed(
-                    [chunk["content"] for chunk in batch]
-                )
+                with tracer.start_as_current_span("ingestion.embed") as embed_span:
+                    embed_span.set_attribute("embedding.batch_size", len(batch))
+                    vectors = await client.embed(
+                        [chunk["content"] for chunk in batch]
+                    )
                 embedding_calls += 1
 
                 if len(vectors) != len(batch):
@@ -134,41 +263,42 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                 embeddings.extend(vectors)
 
             async with pipeline_connection(tenant_id) as conn:
-                for chunk, vector in zip(chunks, embeddings):
-                    vector_value = "[" + ",".join(str(value) for value in vector) + "]"
+                with tracer.start_as_current_span("ingestion.write_db"):
+                    for chunk, vector in zip(chunks, embeddings):
+                        vector_value = "[" + ",".join(str(value) for value in vector) + "]"
+
+                        await conn.execute(
+                            """
+                            INSERT INTO chunks
+                                (document_id, content, embedding, chunk_index,
+                                 token_count, metadata)
+                            VALUES ($1, $2, $3::vector, $4, $5, $6::jsonb)
+                            ON CONFLICT (document_id, chunk_index) DO NOTHING
+                            """,
+                            doc_id,
+                            chunk["content"],
+                            vector_value,
+                            chunk["chunk_index"],
+                            chunk["token_count"],
+                            json.dumps(chunk["metadata"]),
+                        )
 
                     await conn.execute(
                         """
-                        INSERT INTO chunks
-                            (document_id, content, embedding, chunk_index,
-                             token_count, metadata)
-                        VALUES ($1, $2, $3::vector, $4, $5, $6::jsonb)
-                        ON CONFLICT (document_id, chunk_index) DO NOTHING
+                        UPDATE documents
+                        SET status = 'completed',
+                            chunk_count = $2,
+                            source_bytes = NULL,
+                            metadata = metadata || $3::jsonb
+                        WHERE id = $1
                         """,
                         doc_id,
-                        chunk["content"],
-                        vector_value,
-                        chunk["chunk_index"],
-                        chunk["token_count"],
-                        json.dumps(chunk["metadata"]),
+                        len(chunks),
+                        json.dumps({
+                            "page_count": page_count,
+                            "chunking_strategy": chunks[0]["metadata"].get("strategy"),
+                        }),
                     )
-
-                await conn.execute(
-                    """
-                    UPDATE documents
-                    SET status = 'completed',
-                        chunk_count = $2,
-                        source_bytes = NULL,
-                        metadata = metadata || $3::jsonb
-                    WHERE id = $1
-                    """,
-                    doc_id,
-                    len(chunks),
-                    json.dumps({
-                        "page_count": page_count,
-                        "chunking_strategy": chunks[0]["metadata"].get("strategy"),
-                    }),
-                )
 
             span.set_attribute("chunk_count", len(chunks))
             span.set_attribute("embedding_calls", embedding_calls)
@@ -181,6 +311,10 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                 "chunks": len(chunks),
                 "tokens": sum(chunk["token_count"] for chunk in chunks),
             }))
+            INGESTION_DOCUMENTS.labels(status="succeeded").inc()
+            QUEUE_DEPTH.labels(queue="ingestion").set(
+                await redis.llen("queue:ingest")
+            )
 
         except Exception as exc:
             logger.exception("Ingestion failed for document %s", document_id)
@@ -197,18 +331,37 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                     json.dumps({"error": str(exc)[:500]}),
                 )
 
+            INGESTION_DOCUMENTS.labels(status="failed").inc()
+            QUEUE_DEPTH.labels(queue="ingestion").set(
+                await redis.llen("queue:ingest")
+            )
             raise
 
 
-async def evaluate_pipeline_run(ctx, run_id: str, pipeline_id: str):
+async def evaluate_pipeline_run(
+    ctx,
+    run_id: str,
+    pipeline_id: str,
+    trace_context: dict[str, str] | None = None,
+):
     """Asynchronously evaluate a completed RAG pipeline run using LLM-as-a-judge."""
     from evaluation.judge import EvaluationJudge
 
     redis = ctx.get("redis")
-    client = NeuroFlowClient(redis) if redis else None
+    client = (
+        NeuroFlowClient(
+            redis,
+            circuit_breakers=ctx.get("circuit_breakers"),
+        )
+        if redis
+        else None
+    )
     judge = EvaluationJudge(llm_client=client)
 
-    with tracer.start_as_current_span("evaluation.process") as span:
+    with tracer.start_as_current_span(
+        "evaluation.process",
+        context=extract_trace_context(trace_context),
+    ) as span:
         span.set_attribute("run_id", run_id)
         span.set_attribute("pipeline_id", pipeline_id)
         try:
@@ -216,6 +369,44 @@ async def evaluate_pipeline_run(ctx, run_id: str, pipeline_id: str):
                 run_id=run_id,
                 pipeline_id=pipeline_id,
             )
+            async with pipeline_connection(UUID(pipeline_id)) as conn:
+                from observability.quality import (
+                    detect_quality_anomaly,
+                    remember_pipeline_for_refresh,
+                    refresh_rolling_evaluation_metrics,
+                )
+
+                remember_pipeline_for_refresh(pipeline_id)
+                await refresh_rolling_evaluation_metrics(conn, pipeline_id)
+                baseline_rows = await conn.fetch(
+                    """
+                    SELECT e.overall_score
+                    FROM evaluations e
+                    JOIN pipeline_runs r ON r.id = e.run_id
+                    WHERE r.pipeline_id = $1
+                      AND r.id <> $2
+                      AND e.evaluated_at >= NOW() - INTERVAL '7 days'
+                      AND e.overall_score IS NOT NULL
+                    ORDER BY e.evaluated_at DESC
+                    LIMIT 100
+                    """,
+                    UUID(pipeline_id),
+                    UUID(run_id),
+                )
+
+            anomaly = detect_quality_anomaly(
+                [float(row["overall_score"]) for row in baseline_rows],
+                report.overall_score,
+            )
+            if anomaly:
+                await _submit_quality_anomaly(
+                    run_id=run_id,
+                    pipeline_id=pipeline_id,
+                    latest_score=anomaly.latest_score,
+                    baseline_mean=anomaly.baseline_mean,
+                    baseline_stddev=anomaly.baseline_stddev,
+                )
+            EVALUATION_JOBS.labels(status="succeeded").inc()
             span.set_attribute("overall_score", report.overall_score)
             span.set_attribute("judge_model", report.judge_model)
             logger.info(
@@ -260,8 +451,52 @@ async def evaluate_pipeline_run(ctx, run_id: str, pipeline_id: str):
 
             return eval_dict
         except Exception as exc:
+            EVALUATION_JOBS.labels(status="failed").inc()
             logger.exception("Evaluation failed for run %s: %s", run_id, exc)
             raise
+
+
+async def _submit_quality_anomaly(
+    *,
+    run_id: str,
+    pipeline_id: str,
+    latest_score: float,
+    baseline_mean: float,
+    baseline_stddev: float,
+) -> None:
+    """Submit a confirmed anomaly through the authenticated internal API."""
+    if not settings.observability_service_token:
+        logger.error(
+            "Quality anomaly for run %s was not persisted: "
+            "OBSERVABILITY_SERVICE_TOKEN is not configured.",
+            run_id,
+        )
+        return
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.neuroflow_api_url.rstrip("/"),
+            timeout=10,
+        ) as client:
+            response = await client.post(
+                f"/pipelines/{pipeline_id}/suggestions",
+                json={
+                    "run_id": run_id,
+                    "latest_score": latest_score,
+                    "baseline_mean": baseline_mean,
+                    "baseline_stddev": baseline_stddev,
+                },
+                headers={
+                    "Authorization": (
+                        f"Bearer {settings.observability_service_token}"
+                    )
+                },
+            )
+            response.raise_for_status()
+    except httpx.HTTPError:
+        logger.exception(
+            "Failed to persist quality anomaly for run %s.",
+            run_id,
+        )
 
 
 async def poll_finetune_job(ctx, job_id: str, openai_client: Any = None):

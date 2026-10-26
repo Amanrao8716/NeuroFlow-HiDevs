@@ -1,0 +1,133 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "datasource": {
+          "type": "postgres",
+          "uid": "neuroflow-postgres"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "name": "Persisted quality anomalies",
+        "rawQuery": true,
+        "target": {
+          "format": "table",
+          "rawSql": "SELECT created_at AS time, CONCAT(rule_id, ': ', latest_score, ' vs ', baseline_mean) AS text, pipeline_id::text AS tags FROM pipeline_quality_anomalies WHERE $__timeFilter(created_at)"
+        },
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "neuroflow-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "neuroflow_evaluation_score_24h",
+          "legendFormat": "{{pipeline_id}} {{metric}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Persisted rolling 24-hour evaluation means",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "neuroflow-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "sum by (pipeline_id) (increase(neuroflow_quality_anomalies_total[24h]))",
+          "legendFormat": "{{pipeline_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Recorded quality anomalies",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "neuroflow-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "sum by (status) (increase(neuroflow_evaluation_jobs_total[24h]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Evaluation outcomes, 24 hours",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "neuroflow",
+    "quality"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "NeuroFlow Quality",
+  "uid": "neuroflow-quality",
+  "version": 1,
+  "weekStart": ""
+}

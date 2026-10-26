@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import math
@@ -9,8 +10,10 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, Field
 
+from config import settings
 from backend.models.pipeline import (
     AnalyticsResponse,
     DailyQueryCount,
@@ -24,6 +27,7 @@ from backend.models.pipeline import (
     SuggestionsResponse,
 )
 from backend.services.pipeline_optimizer import PipelineOptimizer
+from observability.metrics import QUALITY_ANOMALIES
 
 try:
     from db.pool import connection, pipeline_connection
@@ -33,6 +37,37 @@ except ImportError:
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 logger = logging.getLogger("neuroflow.api.pipelines")
+
+
+class QualityAnomalyRequest(BaseModel):
+    """Worker-reported quality anomaly evidence."""
+
+    run_id: UUID
+    latest_score: float = Field(ge=0, le=1)
+    baseline_mean: float = Field(ge=0, le=1)
+    baseline_stddev: float = Field(ge=0, le=1)
+
+
+class QualityAnomalyResponse(BaseModel):
+    """Persisted quality anomaly and generated pipeline suggestions."""
+
+    id: UUID
+    pipeline_id: UUID
+    run_id: UUID
+    rule_id: str
+    latest_score: float
+    baseline_mean: float
+    baseline_stddev: float
+    suggestions: list[SuggestionItem]
+    created_at: datetime
+    recorded: bool
+    cooldown_suppressed: bool
+
+
+def _decode_suggestions(value: Any) -> list[SuggestionItem]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    return [SuggestionItem(**item) for item in value]
 
 
 def calculate_percentile(data: list[float], p: float) -> float | None:
@@ -689,3 +724,180 @@ async def get_pipeline_suggestions(pipeline_id: UUID):
             has_sufficient_data=len(eval_records) >= optimizer.min_samples,
             suggestions=suggestions,
         )
+
+
+@router.post(
+    "/{pipeline_id}/suggestions",
+    response_model=QualityAnomalyResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_quality_anomaly(
+    pipeline_id: UUID,
+    payload: QualityAnomalyRequest,
+    authorization: str | None = Header(default=None),
+) -> QualityAnomalyResponse:
+    """Persist a worker-detected anomaly using the internal bearer credential."""
+    expected_token = settings.observability_service_token
+    if not expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Internal observability endpoint is not configured.",
+        )
+    scheme, separator, supplied_token = (authorization or "").partition(" ")
+    if (
+        not separator
+        or scheme.lower() != "bearer"
+        or not hmac.compare_digest(supplied_token, expected_token)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid service credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if pipeline_connection is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection pool unavailable.",
+        )
+
+    async with pipeline_connection(pipeline_id) as conn:
+        pipeline = await conn.fetchrow(
+            "SELECT config FROM pipelines WHERE id = $1",
+            pipeline_id,
+        )
+        run_exists = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM pipeline_runs
+                WHERE id = $1 AND pipeline_id = $2
+            )
+            """,
+            payload.run_id,
+            pipeline_id,
+        )
+        if pipeline is None or not run_exists:
+            raise HTTPException(status_code=404, detail="Pipeline run not found.")
+
+        config_data = pipeline["config"]
+        if isinstance(config_data, str):
+            config_data = json.loads(config_data)
+        current_config = PipelineConfig(**config_data)
+        rows = await conn.fetch(
+            """
+            SELECT e.faithfulness, e.answer_relevance, e.context_precision,
+                   e.context_recall, e.overall_score
+            FROM evaluations e
+            JOIN pipeline_runs r ON r.id = e.run_id
+            WHERE r.pipeline_id = $1
+            ORDER BY e.evaluated_at DESC
+            LIMIT 50
+            """,
+            pipeline_id,
+        )
+        eval_records = [
+            {
+                "faithfulness": row["faithfulness"],
+                "answer_relevance": row["answer_relevance"],
+                "context_precision": row["context_precision"],
+                "context_recall": row["context_recall"],
+                "overall_score": row["overall_score"],
+            }
+            for row in rows
+        ]
+        optimizer = PipelineOptimizer()
+        suggestions = optimizer.analyze(eval_records, current_config)
+        rule_id = "overall_score_drop_2_stddev"
+
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                str(pipeline_id),
+            )
+            existing = await conn.fetchrow(
+                """
+                SELECT id, run_id, rule_id, latest_score, baseline_mean,
+                       baseline_stddev, suggestions, created_at
+                FROM pipeline_quality_anomalies
+                WHERE pipeline_id = $1 AND run_id = $2 AND rule_id = $3
+                """,
+                pipeline_id,
+                payload.run_id,
+                rule_id,
+            )
+            if existing:
+                return QualityAnomalyResponse(
+                    id=existing["id"],
+                    pipeline_id=pipeline_id,
+                    run_id=existing["run_id"],
+                    rule_id=existing["rule_id"],
+                    latest_score=existing["latest_score"],
+                    baseline_mean=existing["baseline_mean"],
+                    baseline_stddev=existing["baseline_stddev"],
+                    suggestions=_decode_suggestions(existing["suggestions"]),
+                    created_at=existing["created_at"],
+                    recorded=False,
+                    cooldown_suppressed=False,
+                )
+
+            recent = await conn.fetchrow(
+                """
+                SELECT id, run_id, rule_id, latest_score, baseline_mean,
+                       baseline_stddev, suggestions, created_at
+                FROM pipeline_quality_anomalies
+                WHERE pipeline_id = $1
+                  AND rule_id = $2
+                  AND created_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                pipeline_id,
+                rule_id,
+            )
+            if recent:
+                return QualityAnomalyResponse(
+                    id=recent["id"],
+                    pipeline_id=pipeline_id,
+                    run_id=recent["run_id"],
+                    rule_id=recent["rule_id"],
+                    latest_score=recent["latest_score"],
+                    baseline_mean=recent["baseline_mean"],
+                    baseline_stddev=recent["baseline_stddev"],
+                    suggestions=_decode_suggestions(recent["suggestions"]),
+                    created_at=recent["created_at"],
+                    recorded=False,
+                    cooldown_suppressed=True,
+                )
+
+            row = await conn.fetchrow(
+                """
+                INSERT INTO pipeline_quality_anomalies (
+                    pipeline_id, run_id, rule_id, latest_score, baseline_mean,
+                    baseline_stddev, suggestions
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                RETURNING id, run_id, rule_id, latest_score, baseline_mean,
+                          baseline_stddev, suggestions, created_at
+                """,
+                pipeline_id,
+                payload.run_id,
+                rule_id,
+                payload.latest_score,
+                payload.baseline_mean,
+                payload.baseline_stddev,
+                json.dumps([item.model_dump(mode="json") for item in suggestions]),
+            )
+
+    QUALITY_ANOMALIES.labels(pipeline_id=str(pipeline_id)).inc()
+    return QualityAnomalyResponse(
+        id=row["id"],
+        pipeline_id=pipeline_id,
+        run_id=row["run_id"],
+        rule_id=row["rule_id"],
+        latest_score=row["latest_score"],
+        baseline_mean=row["baseline_mean"],
+        baseline_stddev=row["baseline_stddev"],
+        suggestions=_decode_suggestions(row["suggestions"]),
+        created_at=row["created_at"],
+        recorded=True,
+        cooldown_suppressed=False,
+    )

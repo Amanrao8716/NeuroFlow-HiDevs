@@ -7,6 +7,7 @@ import time
 
 import httpx
 import redis.asyncio as redis
+from redis.exceptions import RedisError
 from api.compare import router as compare_router
 from api.evaluations import router as evaluations_router
 from api.finetune import router as finetune_router
@@ -17,19 +18,14 @@ from api.retrieve import router as retrieve_router
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-    OTLPSpanExporter,
-)
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from config import settings
 from db.health import check_postgres
 from db.pool import close_pool, open_pool
+from observability.metrics import QUEUE_DEPTH
+from observability.tracing import configure_tracing
 from resilience.circuit_breaker import CircuitBreakerRegistry
 from resilience.endpoint_rate_limiter import RateLimitMiddleware
 from resilience.backpressure import INGEST_QUEUE_KEY
@@ -40,26 +36,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Configure OpenTelemetry tracing and export spans to Jaeger.
-resource = Resource.create(
-    {
-        "service.name": settings.app_name,
-        "deployment.environment": settings.app_env,
-    }
+tracer_provider = configure_tracing(
+    settings.app_name,
+    settings.otel_exporter_otlp_endpoint,
+    settings.app_env,
 )
-
-tracer_provider = TracerProvider(resource=resource)
-
-otlp_exporter = OTLPSpanExporter(
-    endpoint=settings.otel_exporter_otlp_endpoint,
-    insecure=True,
-)
-
-tracer_provider.add_span_processor(
-    BatchSpanProcessor(otlp_exporter)
-)
-
-trace.set_tracer_provider(tracer_provider)
 
 
 @asynccontextmanager
@@ -76,6 +57,12 @@ async def lifespan(app: FastAPI):
 
         await app.state.redis.ping()
         logger.info("Redis connection established.")
+        QUEUE_DEPTH.labels(queue="ingestion").set(
+            await app.state.redis.llen(INGEST_QUEUE_KEY)
+        )
+        QUEUE_DEPTH.labels(queue="evaluation").set(
+            await app.state.redis.llen("neuroflow:queue:evaluations")
+        )
 
         # Initialize resilience components
         app.state.circuit_breakers = CircuitBreakerRegistry(app.state.redis)
@@ -260,6 +247,17 @@ async def health():
 @app.get("/metrics", response_class=PlainTextResponse)
 async def metrics():
     """Expose Prometheus metrics."""
+    redis_client = getattr(app.state, "redis", None)
+    if redis_client is not None:
+        try:
+            QUEUE_DEPTH.labels(queue="ingestion").set(
+                await redis_client.llen(INGEST_QUEUE_KEY)
+            )
+            QUEUE_DEPTH.labels(queue="evaluation").set(
+                await redis_client.llen("neuroflow:queue:evaluations")
+            )
+        except (RedisError, OSError, TimeoutError):
+            logger.exception("Could not refresh queue metrics from Redis.")
     return PlainTextResponse(
         content=generate_latest().decode("utf-8"),
         media_type=CONTENT_TYPE_LATEST,

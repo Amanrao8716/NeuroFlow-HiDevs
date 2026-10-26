@@ -1,0 +1,65 @@
+groups:
+  - name: neuroflow-operational
+    rules:
+      - alert: NeuroFlowIngestionFailures
+        expr: sum(rate(neuroflow_ingestion_documents_total{status="failed"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NeuroFlow ingestion failures exceed 0.1 failures per second"
+          description: "This is an absolute failure rate, not a percentage of jobs."
+
+      - alert: NeuroFlowQueryLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(neuroflow_query_duration_seconds_bucket[5m]))) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NeuroFlow query p95 exceeds five seconds"
+          description: "The rolling five-minute p95 query duration is above five seconds."
+
+      - alert: NeuroFlowIngestionQueueHigh
+        expr: neuroflow_queue_depth{queue="ingestion"} > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NeuroFlow ingestion queue is above 100 jobs"
+          description: "Queued ingestion jobs have remained above 100 for five minutes."
+
+      - alert: NeuroFlowEvaluationQueueHigh
+        expr: neuroflow_queue_depth{queue="evaluation"} > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NeuroFlow evaluation queue is above 100 jobs"
+          description: "Queued evaluations have remained above 100 for five minutes."
+
+      - alert: NeuroFlowCircuitBreakerOpen
+        expr: neuroflow_circuit_breaker_open > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A NeuroFlow provider circuit breaker is open"
+          description: "Check provider health and Jaeger traces before resuming traffic."
+
+      - alert: NeuroFlowEvaluationQualityLow
+        expr: neuroflow_evaluation_score_24h{metric="overall_score"} < 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NeuroFlow rolling evaluation quality is low"
+          description: "The persisted rolling 24-hour overall evaluation score is below 0.5."
+
+      - alert: NeuroFlowQualityAnomaly
+        expr: increase(neuroflow_quality_anomalies_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A NeuroFlow pipeline quality anomaly was persisted"
+          description: "Review the corresponding anomaly annotation in the NeuroFlow Quality dashboard."
