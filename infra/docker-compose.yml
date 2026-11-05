@@ -1,5 +1,4 @@
-﻿
-services:
+﻿services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -34,7 +33,6 @@ services:
       timeout: 5s
       retries: 5
 
-    
   mlflow:
     build:
       context: ..
@@ -57,6 +55,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
   api:
     image: neuroflow-api:latest
     build:
@@ -75,7 +74,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OBSERVABILITY_SERVICE_TOKEN: ${OBSERVABILITY_SERVICE_TOKEN:?Set OBSERVABILITY_SERVICE_TOKEN in .env}
       NEUROFLOW_API_URL: http://api:8000
-    
+      NEUROFLOW_JWT_SECRET: ${NEUROFLOW_JWT_SECRET}
+      NEUROFLOW_AUTH_CLIENTS: ${NEUROFLOW_AUTH_CLIENTS}
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,7 +89,10 @@ services:
     build:
       context: ..
       dockerfile: backend/Dockerfile
-    command: ["python", "-m", "worker"]
+    command:
+      - python
+      - -m
+      - worker
     env_file:
       - ../.env
     environment:
@@ -101,6 +104,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OBSERVABILITY_SERVICE_TOKEN: ${OBSERVABILITY_SERVICE_TOKEN:?Set OBSERVABILITY_SERVICE_TOKEN in .env}
       NEUROFLOW_API_URL: http://api:8000
+      NEUROFLOW_JWT_SECRET: ${NEUROFLOW_JWT_SECRET}
+      NEUROFLOW_AUTH_CLIENTS: ${NEUROFLOW_AUTH_CLIENTS}
     expose:
       - "8001"
     depends_on:

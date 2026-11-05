@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from uuid import UUID
 
@@ -71,6 +72,15 @@ class RetrieveResponse(BaseModel):
     total_tokens: int
     sources: list[dict[str, Any]]
     chunks: list[ChunkResponse]
+
+
+class RetrievalRankingResponse(BaseModel):
+    """Actual chunk ID rankings from each retrieval stage for isolated benchmarking."""
+
+    dense_only: list[str]
+    sparse_only: list[str]
+    hybrid_rrf: list[str]
+    hybrid_reranked: list[str]
 
 
 @router.post("/retrieve", response_model=RetrieveResponse)
@@ -163,3 +173,54 @@ async def retrieve_endpoint(request: RetrieveRequest, req: Request):
         raise HTTPException(
             status_code=500, detail=f"Retrieval failed: {str(exc)}"
         ) from exc
+
+
+@router.post("/__test__/retrieval-rankings", response_model=RetrievalRankingResponse)
+async def retrieval_rankings_for_test(
+    request: RetrieveRequest,
+    req: Request,
+    _admin=Depends(require_scope("admin")),
+):
+    """Return actual retrieval rankings only when an isolated test deployment opts in."""
+    if os.getenv("NEUROFLOW_TEST_BENCHMARK_ENDPOINT") != "true":
+        raise HTTPException(status_code=404, detail="Not found.")
+    if os.getenv("HF_HUB_OFFLINE") != "1" or os.getenv("TRANSFORMERS_OFFLINE") != "1":
+        raise HTTPException(
+            status_code=503,
+            detail="Benchmark model loading must be offline; configure HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1.",
+        )
+
+    query_text = sanitize_text(request.query)
+    if not query_text.strip():
+        raise HTTPException(status_code=422, detail="Query must contain text.")
+    query_text, secret_types = redact_secrets(query_text)
+    for pattern_type in sorted(set(secret_types)):
+        logger.warning("Sensitive value redacted from benchmark query (%s).", pattern_type)
+    detection = detect_prompt_injection(query_text)
+    if detection.detected:
+        raise HTTPException(status_code=400, detail="Benchmark query rejected by security policy.")
+    from api.query import get_generation_pipeline
+    try:
+        if await classify_query(getattr(get_generation_pipeline(req), "client", None), query_text):
+            raise HTTPException(status_code=400, detail="Benchmark query rejected by security policy.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Benchmark query classifier unavailable (%s).", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Query security classification unavailable.") from exc
+
+    processed = await _processor.process(query_text, explicit_filters=request.filters)
+    dense, sparse, _metadata = await _retriever.retrieve_parallel(
+        query=processed,
+        k=request.top_k,
+        pipeline_id=request.pipeline_id,
+        filters=processed.filters,
+    )
+    fused = reciprocal_rank_fusion([dense, sparse])
+    reranked = await _reranker.rerank(processed.query, fused, top_n=40) if fused else []
+    return RetrievalRankingResponse(
+        dense_only=[item.chunk_id for item in dense],
+        sparse_only=[item.chunk_id for item in sparse],
+        hybrid_rrf=[item.chunk_id for item in fused],
+        hybrid_reranked=[item.chunk_id for item in reranked],
+    )

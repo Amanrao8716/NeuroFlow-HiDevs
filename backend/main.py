@@ -183,7 +183,7 @@ async def health():
     # ── MLflow (optional) ──────────────────────────────────────────────
     t0 = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{settings.mlflow_tracking_uri.rstrip('/')}/health"
             )
@@ -213,9 +213,14 @@ async def health():
     if cb_registry:
         for name, cb in cb_registry.all().items():
             try:
+                # state() applies an elapsed recovery timeout (OPEN -> HALF_OPEN).
+                # Health should report the live breaker state, not a stale Redis value.
+                state = getattr(cb, "state", None)
+                if state is not None:
+                    await state()
                 info = await cb.get_info()
                 circuit_info.append(info)
-                if info.get("state") == "open":
+                if info.get("state") in {"open", "half_open"}:
                     degraded = True
             except Exception as exc:
                 circuit_info.append({"name": name, "error": str(exc)})
