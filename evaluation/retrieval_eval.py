@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -240,10 +241,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--pipeline-id",
         type=str,
-        default=None,
+        default=os.environ.get("NEUROFLOW_PIPELINE_ID"),
         help="Optional tenant pipeline UUID",
+    )
+    parser.add_argument(
+        "--env",
+        choices=("development", "staging", "production"),
+        default=None,
+        help="Deployment environment label; database settings come from environment variables.",
     )
     args = parser.parse_args()
 
+    if args.env == "staging" and not args.pipeline_id:
+        parser.error("NEUROFLOW_PIPELINE_ID is required for staging evaluation")
     pid = UUID(args.pipeline_id) if args.pipeline_id else None
     asyncio.run(run_evaluation(pipeline_id=pid))
