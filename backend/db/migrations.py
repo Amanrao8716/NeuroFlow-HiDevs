@@ -1,10 +1,8 @@
-
 """Check and apply database schema migrations."""
 
 from pathlib import Path
 
 from db.pool import get_pool
-
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
@@ -14,23 +12,17 @@ async def apply_migrations() -> None:
     pool = get_pool()
 
     async with pool.acquire() as conn:
-        schema_exists = await conn.fetchval(
-            "SELECT to_regclass('public.documents') IS NOT NULL"
-        )
+        schema_exists = await conn.fetchval("SELECT to_regclass('public.documents') IS NOT NULL")
 
         if not schema_exists:
             for filename in ("001_schema.sql", "002_rls.sql"):
                 migration_file = MIGRATIONS_DIR / filename
 
                 if not migration_file.is_file():
-                    raise FileNotFoundError(
-                        f"Migration file not found: {migration_file}"
-                    )
+                    raise FileNotFoundError(f"Migration file not found: {migration_file}")
 
                 async with conn.transaction():
-                    await conn.execute(
-                        migration_file.read_text(encoding="utf-8")
-                    )
+                    await conn.execute(migration_file.read_text(encoding="utf-8"))
 
             print("Database schema and RLS policies applied.")
 
@@ -55,14 +47,10 @@ async def apply_migrations() -> None:
                 rls_file = MIGRATIONS_DIR / "002_rls.sql"
 
                 if not rls_file.is_file():
-                    raise FileNotFoundError(
-                        f"RLS migration not found: {rls_file}"
-                    )
+                    raise FileNotFoundError(f"RLS migration not found: {rls_file}")
 
                 async with conn.transaction():
-                    await conn.execute(
-                        rls_file.read_text(encoding="utf-8")
-                    )
+                    await conn.execute(rls_file.read_text(encoding="utf-8"))
 
                 print("RLS policies applied.")
 
@@ -77,8 +65,6 @@ async def apply_migrations() -> None:
                 continue
 
             async with conn.transaction():
-                await conn.execute(
-                    migration_file.read_text(encoding="utf-8")
-                )
+                await conn.execute(migration_file.read_text(encoding="utf-8"))
 
             print(f"Applied migration: {migration_file.name}")

@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import time
@@ -49,10 +48,7 @@ class OpenAIProvider(BaseLLMProvider):
 
     @staticmethod
     def _format_messages(messages: list[ChatMessage]) -> list[dict]:
-        return [
-            {"role": message.role, "content": message.content}
-            for message in messages
-        ]
+        return [{"role": message.role, "content": message.content} for message in messages]
 
     async def _create_completion(self, **kwargs):
         """Retry rate-limit errors up to three times."""
@@ -95,10 +91,7 @@ class OpenAIProvider(BaseLLMProvider):
         input_price, output_price = self.MODEL_PRICING.get(
             model, self.MODEL_PRICING.get(self.model, (0.15, 0.60))
         )
-        cost = (
-            input_tokens * input_price
-            + output_tokens * output_price
-        ) / 1_000_000
+        cost = (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 
         return GenerationResult(
             content=choice.message.content or "",
@@ -136,7 +129,7 @@ class OpenAIProvider(BaseLLMProvider):
         embeddings = []
 
         for start in range(0, len(texts), 100):
-            batch = texts[start:start + 100]
+            batch = texts[start : start + 100]
 
             response = await self.client.embeddings.create(
                 model=self.embedding_model,
@@ -144,8 +137,7 @@ class OpenAIProvider(BaseLLMProvider):
             )
 
             embeddings.extend(
-                item.embedding
-                for item in sorted(response.data, key=lambda item: item.index)
+                item.embedding for item in sorted(response.data, key=lambda item: item.index)
             )
 
         return embeddings

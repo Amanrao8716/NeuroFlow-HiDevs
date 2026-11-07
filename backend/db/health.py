@@ -1,8 +1,6 @@
-
 """Database connectivity and health checks."""
 
 import asyncpg
-
 from db.pool import get_pool
 
 

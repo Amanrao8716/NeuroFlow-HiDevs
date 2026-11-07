@@ -3,24 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
 import json
 import logging
 import time
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from observability.metrics import QUERY_LATENCY, QUERY_TOTAL
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from pipelines.generation.generator import GenerationPipeline, GenerationResult
 from backend.security.auth import require_scope
 from backend.security.prompt_injection import classify_query, detect_prompt_injection
-from backend.security.validators import sanitize_text
 from backend.security.secrets import redact_secrets
+from backend.security.validators import sanitize_text
+from pipelines.generation.generator import GenerationPipeline, GenerationResult
 
 router = APIRouter(tags=["generation"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.query")
@@ -31,7 +31,9 @@ _pipeline_instance: GenerationPipeline | None = None
 def get_generation_pipeline(request: Request | None = None) -> GenerationPipeline:
     """Obtain or initialize the GenerationPipeline singleton."""
     global _pipeline_instance
-    redis_client = getattr(request.app.state, "redis", None) if request and hasattr(request, "app") else None
+    redis_client = (
+        getattr(request.app.state, "redis", None) if request and hasattr(request, "app") else None
+    )
     circuit_breakers = (
         getattr(request.app.state, "circuit_breakers", None)
         if request and hasattr(request, "app")
@@ -43,6 +45,7 @@ def get_generation_pipeline(request: Request | None = None) -> GenerationPipelin
             _pipeline_instance.client.circuit_breakers = circuit_breakers
     elif _pipeline_instance.client is None and redis_client is not None:
         from providers.client import NeuroFlowClient
+
         _pipeline_instance.redis = redis_client
         _pipeline_instance.client = NeuroFlowClient(
             redis_client,
@@ -129,12 +132,19 @@ async def post_query(request: QueryRequest, req: Request):
     pipeline = get_generation_pipeline(req)
     try:
         if await classify_query(getattr(pipeline, "client", None), cleaned_query):
-            return JSONResponse(status_code=400, content={"error": "query_rejected", "reason": "potential_prompt_injection"})
+            return JSONResponse(
+                status_code=400,
+                content={"error": "query_rejected", "reason": "potential_prompt_injection"},
+            )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Query security classification unavailable.") from exc
+        logger.warning(
+            "Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=503, detail="Query security classification unavailable."
+        ) from exc
     run_id = uuid4()
 
     if not request.stream:
@@ -156,9 +166,7 @@ async def post_query(request: QueryRequest, req: Request):
                 query=result.query,
                 query_type=result.query_type,
                 answer=result.generation,
-                citations=[
-                    CitationItem(**c.to_dict()) for c in result.citations.all_citations
-                ],
+                citations=[CitationItem(**c.to_dict()) for c in result.citations.all_citations],
                 sources=result.sources,
                 chunks_used=result.chunks_used,
                 input_tokens=result.input_tokens,

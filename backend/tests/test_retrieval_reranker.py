@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from pipelines.retrieval.reranker import CrossEncoderReranker, LLMReranker

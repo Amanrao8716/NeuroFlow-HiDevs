@@ -1,15 +1,15 @@
 """Unit and Integration tests for A/B Pipeline Comparison endpoint (POST /pipelines/compare)."""
 
 import asyncio
-import pytest
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
-from fastapi.testclient import TestClient
 
+import pytest
+from fastapi.testclient import TestClient
 from main import app
-from pipelines.generation.generator import GenerationPipeline, GenerationResult
+
 from pipelines.generation.citations import ParsedCitations
+from pipelines.generation.generator import GenerationPipeline, GenerationResult
 
 
 @pytest.fixture
@@ -134,8 +134,10 @@ def test_compare_one_side_failure(client):
 
     mock_generator.generate = mock_generate
 
-    with patch("api.compare.pipeline_connection", return_value=mock_pool), \
-         patch("api.compare.get_generation_pipeline", return_value=mock_generator):
+    with (
+        patch("api.compare.pipeline_connection", return_value=mock_pool),
+        patch("api.compare.get_generation_pipeline", return_value=mock_generator),
+    ):
         response = client.post(
             "/pipelines/compare",
             json={

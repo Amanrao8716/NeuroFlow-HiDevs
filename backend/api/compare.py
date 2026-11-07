@@ -14,9 +14,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from observability.metrics import QUERY_LATENCY, QUERY_TOTAL
 from pydantic import BaseModel, Field
 
-from observability.metrics import QUERY_LATENCY, QUERY_TOTAL
 from pipelines.generation.generator import GenerationPipeline
 
 try:
@@ -39,7 +39,9 @@ _pipeline_instance: GenerationPipeline | None = None
 def get_generation_pipeline(request: Request | None = None) -> GenerationPipeline:
     """Obtain or initialize the GenerationPipeline singleton."""
     global _pipeline_instance
-    redis_client = getattr(request.app.state, "redis", None) if request and hasattr(request, "app") else None
+    redis_client = (
+        getattr(request.app.state, "redis", None) if request and hasattr(request, "app") else None
+    )
     circuit_breakers = (
         getattr(request.app.state, "circuit_breakers", None)
         if request and hasattr(request, "app")
@@ -51,6 +53,7 @@ def get_generation_pipeline(request: Request | None = None) -> GenerationPipelin
             _pipeline_instance.client.circuit_breakers = circuit_breakers
     elif _pipeline_instance.client is None and redis_client is not None:
         from providers.client import NeuroFlowClient
+
         _pipeline_instance.redis = redis_client
         _pipeline_instance.client = NeuroFlowClient(
             redis_client,
@@ -62,11 +65,17 @@ def get_generation_pipeline(request: Request | None = None) -> GenerationPipelin
 class ComparePipelinesRequest(BaseModel):
     """Request payload for comparing two pipelines."""
 
-    query: str = Field(..., min_length=1, max_length=5000, description="Query to execute against both pipelines")
+    query: str = Field(
+        ..., min_length=1, max_length=5000, description="Query to execute against both pipelines"
+    )
     pipeline_a_id: UUID = Field(..., description="First pipeline ID")
     pipeline_b_id: UUID = Field(..., description="Second pipeline ID")
-    pipeline_a_version: int | None = Field(default=None, description="Optional version for pipeline A")
-    pipeline_b_version: int | None = Field(default=None, description="Optional version for pipeline B")
+    pipeline_a_version: int | None = Field(
+        default=None, description="Optional version for pipeline A"
+    )
+    pipeline_b_version: int | None = Field(
+        default=None, description="Optional version for pipeline B"
+    )
 
 
 class PipelineComparisonResult(BaseModel):
@@ -139,8 +148,16 @@ async def _execute_single_pipeline(
         QUERY_TOTAL.labels(status=gen_result.status).inc()
         QUERY_LATENCY.observe(time.perf_counter() - start_time)
 
-        total_latency = float(gen_result.latency_ms) if gen_result.latency_ms is not None else round((time.perf_counter() - start_time) * 1000.0, 2)
-        retrieval_lat = float(gen_result.retrieval_latency_ms) if gen_result.retrieval_latency_ms is not None else None
+        total_latency = (
+            float(gen_result.latency_ms)
+            if gen_result.latency_ms is not None
+            else round((time.perf_counter() - start_time) * 1000.0, 2)
+        )
+        retrieval_lat = (
+            float(gen_result.retrieval_latency_ms)
+            if gen_result.retrieval_latency_ms is not None
+            else None
+        )
 
         # Fetch evaluation score if completed synchronously or previously recorded
         eval_score: float | None = None
@@ -160,7 +177,9 @@ async def _execute_single_pipeline(
                     if eval_row and eval_row["overall_score"] is not None:
                         eval_score = float(eval_row["overall_score"])
             except Exception as e:
-                logger.debug("Could not fetch evaluation score for run %s: %s", gen_result.run_id, e)
+                logger.debug(
+                    "Could not fetch evaluation score for run %s: %s", gen_result.run_id, e
+                )
 
         if gen_result.status == "failed":
             return PipelineComparisonResult(
@@ -222,7 +241,10 @@ async def compare_pipelines(
     """
     # 1. Handle identical pipeline IDs
     if payload.pipeline_a_id == payload.pipeline_b_id:
-        if payload.pipeline_a_version is None or payload.pipeline_a_version == payload.pipeline_b_version:
+        if (
+            payload.pipeline_a_version is None
+            or payload.pipeline_a_version == payload.pipeline_b_version
+        ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot compare identical pipeline IDs. pipeline_a_id and pipeline_b_id must be distinct, or specify different versions.",
@@ -243,12 +265,19 @@ async def compare_pipelines(
         logger.warning("Comparison query matched prompt injection signal %s", detection.pattern)
     try:
         if await classify_query(getattr(generator, "client", None), query_text):
-            return JSONResponse(status_code=400, content={"error": "query_rejected", "reason": "potential_prompt_injection"})
+            return JSONResponse(
+                status_code=400,
+                content={"error": "query_rejected", "reason": "potential_prompt_injection"},
+            )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Query security classification unavailable.") from exc
+        logger.warning(
+            "Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=503, detail="Query security classification unavailable."
+        ) from exc
 
     # 4. Execute both pipelines concurrently using asyncio.gather
     result_a, result_b = await asyncio.gather(

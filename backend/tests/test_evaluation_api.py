@@ -1,11 +1,12 @@
 """Unit and API tests for evaluation human rating calibration and runner."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
-from fastapi.testclient import TestClient
 
+import pytest
+from fastapi.testclient import TestClient
 from main import app
+
 from evaluation.calibration_runner import (
     CalibrationRunner,
     calculate_mae,
@@ -51,6 +52,7 @@ async def test_calibration_runner_with_mock_evaluator():
     mock_judge.llm_client = MagicMock()
 
     call_count = 0
+
     async def mock_evaluate(query, context, answer, run_id, pipeline_id, **kwargs):
         nonlocal call_count
         call_count += 1
@@ -114,6 +116,7 @@ def test_patch_rating_calibration_needed_true(client):
     class MockPipelineConnCtx:
         async def __aenter__(self):
             return mock_conn
+
         async def __aexit__(self, *args):
             pass
 
@@ -156,6 +159,7 @@ def test_patch_rating_calibration_needed_false(client):
     class MockPipelineConnCtx:
         async def __aenter__(self):
             return mock_conn
+
         async def __aexit__(self, *args):
             pass
 

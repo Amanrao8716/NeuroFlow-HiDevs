@@ -1,10 +1,7 @@
 """Tests for prompt builder and dynamic query instructions."""
 
-import pytest
 from pipelines.generation.prompt_builder import (
-    BASE_SYSTEM_PROMPT,
     PromptBuilder,
-    SourceMapEntry,
 )
 from pipelines.retrieval.context_assembler import AssembledContext
 from pipelines.retrieval.retriever import RetrievalResult
@@ -32,7 +29,10 @@ def test_prompt_builder_query_types():
 
     # Unknown type defaults safely
     prompt_unknown = builder.build("Hello world", query_type="conversational")
-    assert "Provide a clear and well-reasoned answer directly based on the context" in prompt_unknown.system_prompt
+    assert (
+        "Provide a clear and well-reasoned answer directly based on the context"
+        in prompt_unknown.system_prompt
+    )
 
 
 def test_prompt_builder_source_map_and_context():

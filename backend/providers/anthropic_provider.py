@@ -1,4 +1,3 @@
-
 import os
 import time
 from collections.abc import AsyncGenerator
@@ -27,9 +26,7 @@ class AnthropicProvider(BaseLLMProvider):
         client: AsyncAnthropic | None = None,
     ):
         self.model = model
-        self.client = client or AsyncAnthropic(
-            api_key=os.getenv("ANTHROPIC_API_KEY")
-        )
+        self.client = client or AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     @property
     def cost_per_input_token(self) -> float:
@@ -54,10 +51,12 @@ class AnthropicProvider(BaseLLMProvider):
             if message.role == "system":
                 system_parts.append(str(message.content))
             else:
-                formatted.append({
-                    "role": message.role,
-                    "content": message.content,
-                })
+                formatted.append(
+                    {
+                        "role": message.role,
+                        "content": message.content,
+                    }
+                )
 
         system = "\n".join(system_parts) or None
         return system, formatted
@@ -82,9 +81,7 @@ class AnthropicProvider(BaseLLMProvider):
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         content = "".join(
-            block.text
-            for block in response.content
-            if getattr(block, "type", None) == "text"
+            block.text for block in response.content if getattr(block, "type", None) == "text"
         )
 
         input_tokens = response.usage.input_tokens
@@ -94,10 +91,7 @@ class AnthropicProvider(BaseLLMProvider):
         input_price, output_price = self.MODEL_PRICING.get(
             model, self.MODEL_PRICING.get(self.model, (0.80, 4.00))
         )
-        cost = (
-            input_tokens * input_price
-            + output_tokens * output_price
-        ) / 1_000_000
+        cost = (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 
         return GenerationResult(
             content=content,

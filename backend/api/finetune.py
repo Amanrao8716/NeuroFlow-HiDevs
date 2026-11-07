@@ -7,10 +7,9 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-
 from config import settings
 from db.pool import connection
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from models.finetune import (
     CreateFinetuneJobRequest,
     FinetuneJobListResponse,
@@ -18,6 +17,7 @@ from models.finetune import (
     TrainingDataPreviewItem,
     TrainingDataPreviewResponse,
 )
+
 from pipelines.finetuning.extractor import TrainingDataExtractor
 from pipelines.finetuning.job_manager import FinetuneJobManager
 
@@ -25,7 +25,9 @@ logger = logging.getLogger("neuroflow.api.finetune")
 
 from backend.security.auth import require_scope
 
-router = APIRouter(prefix="/finetune", tags=["finetuning"], dependencies=[Depends(require_scope("admin"))])
+router = APIRouter(
+    prefix="/finetune", tags=["finetuning"], dependencies=[Depends(require_scope("admin"))]
+)
 
 
 def _format_mlflow_url(run_id: str | None) -> str | None:

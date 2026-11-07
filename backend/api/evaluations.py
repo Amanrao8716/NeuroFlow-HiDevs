@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -153,15 +154,14 @@ async def patch_run_rating(
             )
 
     discrepancy = (
-        round(abs(overall_score - normalized_rating), 4)
-        if overall_score is not None
-        else None
+        round(abs(overall_score - normalized_rating), 4) if overall_score is not None else None
     )
     calibration_needed = bool(discrepancy is not None and discrepancy > 0.3)
 
-    msg = (
-        f"Rating {payload.rating} recorded. "
-        + ("Calibration recommended due to score divergence > 0.3." if calibration_needed else "Score is well calibrated.")
+    msg = f"Rating {payload.rating} recorded. " + (
+        "Calibration recommended due to score divergence > 0.3."
+        if calibration_needed
+        else "Score is well calibrated."
     )
 
     return RatingResponse(
@@ -308,28 +308,30 @@ async def list_evaluations(
             JOIN pipelines p ON p.id = r.pipeline_id
             {filter_clause}
             ORDER BY e.evaluated_at DESC
-            LIMIT {'$2' if pipeline_id else '$1'}
+            LIMIT {"$2" if pipeline_id else "$1"}
         """
         params = [pipeline_id, limit] if pipeline_id else [limit]
         rows = await conn.fetch(query_sql, *params)
 
         results = []
         for r in rows:
-            results.append({
-                "eval_id": str(r["eval_id"]),
-                "run_id": str(r["run_id"]),
-                "pipeline_id": str(r["pipeline_id"]),
-                "pipeline_name": r["pipeline_name"],
-                "query": r["query"],
-                "answer": r["answer"],
-                "retrieved_chunk_ids": [str(cid) for cid in (r["retrieved_chunk_ids"] or [])],
-                "faithfulness": r["faithfulness"],
-                "answer_relevance": r["answer_relevance"],
-                "context_precision": r["context_precision"],
-                "context_recall": r["context_recall"],
-                "overall_score": r["overall_score"],
-                "judge_model": r["judge_model"],
-                "user_rating": r["user_rating"],
-                "evaluated_at": r["evaluated_at"].isoformat() if r["evaluated_at"] else None,
-            })
+            results.append(
+                {
+                    "eval_id": str(r["eval_id"]),
+                    "run_id": str(r["run_id"]),
+                    "pipeline_id": str(r["pipeline_id"]),
+                    "pipeline_name": r["pipeline_name"],
+                    "query": r["query"],
+                    "answer": r["answer"],
+                    "retrieved_chunk_ids": [str(cid) for cid in (r["retrieved_chunk_ids"] or [])],
+                    "faithfulness": r["faithfulness"],
+                    "answer_relevance": r["answer_relevance"],
+                    "context_precision": r["context_precision"],
+                    "context_recall": r["context_recall"],
+                    "overall_score": r["overall_score"],
+                    "judge_model": r["judge_model"],
+                    "user_rating": r["user_rating"],
+                    "evaluated_at": r["evaluated_at"].isoformat() if r["evaluated_at"] else None,
+                }
+            )
         return results

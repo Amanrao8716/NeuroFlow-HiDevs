@@ -1,13 +1,11 @@
-
 """NeuroFlow FastAPI application."""
 
-from contextlib import asynccontextmanager
 import logging
 import time
+from contextlib import asynccontextmanager
 
 import httpx
 import redis.asyncio as redis
-from redis.exceptions import RedisError
 from api.compare import router as compare_router
 from api.evaluations import router as evaluations_router
 from api.finetune import router as finetune_router
@@ -15,24 +13,25 @@ from api.ingest import router as ingest_router
 from api.pipelines import router as pipelines_router
 from api.query import router as query_router
 from api.retrieve import router as retrieve_router
-from fastapi import Depends, FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-
 from config import settings
 from db.health import check_postgres
 from db.pool import close_pool, open_pool
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, PlainTextResponse
 from observability.metrics import QUEUE_DEPTH
 from observability.tracing import configure_tracing
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from redis.exceptions import RedisError
+from resilience.backpressure import INGEST_QUEUE_KEY
 from resilience.circuit_breaker import CircuitBreakerRegistry
 from resilience.endpoint_rate_limiter import RateLimitMiddleware
-from resilience.backpressure import INGEST_QUEUE_KEY
 from resilience.timeout_manager import TimeoutManager
-from backend.security.auth import require_scope, router as auth_router
-from backend.security.middleware import SecurityHeadersMiddleware
 
+from backend.security.auth import require_scope
+from backend.security.auth import router as auth_router
+from backend.security.middleware import SecurityHeadersMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,9 +58,7 @@ async def lifespan(app: FastAPI):
 
         await app.state.redis.ping()
         logger.info("Redis connection established.")
-        QUEUE_DEPTH.labels(queue="ingestion").set(
-            await app.state.redis.llen(INGEST_QUEUE_KEY)
-        )
+        QUEUE_DEPTH.labels(queue="ingestion").set(await app.state.redis.llen(INGEST_QUEUE_KEY))
         QUEUE_DEPTH.labels(queue="evaluation").set(
             await app.state.redis.llen("neuroflow:queue:evaluations")
         )
@@ -171,7 +168,7 @@ async def health():
         else:
             checks["redis"] = {"status": "unhealthy", "error": "Not initialized"}
             critical = True
-    except Exception as exc:
+    except Exception:
         redis_latency_ms = round((time.perf_counter() - t0) * 1000)
         logger.exception("Redis health check failed.")
         checks["redis"] = {
@@ -184,16 +181,10 @@ async def health():
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                f"{settings.mlflow_tracking_uri.rstrip('/')}/health"
-            )
+            response = await client.get(f"{settings.mlflow_tracking_uri.rstrip('/')}/health")
         mlflow_latency_ms = round((time.perf_counter() - t0) * 1000)
         checks["mlflow"] = {
-            "status": (
-                "healthy"
-                if response.status_code == 200
-                else "unhealthy"
-            ),
+            "status": ("healthy" if response.status_code == 200 else "unhealthy"),
             "latency_ms": mlflow_latency_ms,
         }
         if checks["mlflow"]["status"] != "healthy":
@@ -262,9 +253,7 @@ async def metrics():
     redis_client = getattr(app.state, "redis", None)
     if redis_client is not None:
         try:
-            QUEUE_DEPTH.labels(queue="ingestion").set(
-                await redis_client.llen(INGEST_QUEUE_KEY)
-            )
+            QUEUE_DEPTH.labels(queue="ingestion").set(await redis_client.llen(INGEST_QUEUE_KEY))
             QUEUE_DEPTH.labels(queue="evaluation").set(
                 await redis_client.llen("neuroflow:queue:evaluations")
             )

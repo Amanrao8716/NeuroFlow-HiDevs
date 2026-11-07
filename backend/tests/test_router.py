@@ -1,4 +1,3 @@
-
 import json
 
 import pytest
@@ -12,10 +11,7 @@ class FakeRedis:
 
     async def hgetall(self, key):
         assert key == "router:models"
-        return {
-            name: json.dumps(config)
-            for name, config in self.models.items()
-        }
+        return {name: json.dumps(config) for name, config in self.models.items()}
 
 
 @pytest.fixture
@@ -58,10 +54,7 @@ def models():
 
 @pytest.fixture
 def router(models):
-    providers = {
-        name: object()
-        for name in models
-    }
+    providers = {name: object() for name in models}
     return ModelRouter(FakeRedis(models), providers)
 
 
@@ -73,46 +66,35 @@ async def test_default_route_chooses_cheapest(router):
 
 @pytest.mark.asyncio
 async def test_evaluation_uses_judge_model(router):
-    result = await router.route(
-        RoutingCriteria(task_type="evaluation")
-    )
+    result = await router.route(RoutingCriteria(task_type="evaluation"))
     assert result == "gpt-4o"
 
 
 @pytest.mark.asyncio
 async def test_vision_requirement(router):
-    result = await router.route(
-        RoutingCriteria(require_vision=True)
-    )
+    result = await router.route(RoutingCriteria(require_vision=True))
     assert result == "gpt-4o-mini"
 
 
 @pytest.mark.asyncio
 async def test_long_context_requirement(router):
-    result = await router.route(
-        RoutingCriteria(require_long_context=True)
-    )
+    result = await router.route(RoutingCriteria(require_long_context=True))
     assert result == "gpt-4o-mini"
 
 
 @pytest.mark.asyncio
 async def test_max_cost_filters_models(router):
-    result = await router.route(
-        RoutingCriteria(max_cost_per_call=0.001)
-    )
+    result = await router.route(RoutingCriteria(max_cost_per_call=0.001))
     assert result == "text-model"
 
 
 @pytest.mark.asyncio
 async def test_fine_tuned_preference(router):
-    result = await router.route(
-        RoutingCriteria(prefer_fine_tuned=True)
-    )
+    result = await router.route(RoutingCriteria(prefer_fine_tuned=True))
     assert result == "fine-tuned-model"
 
 
 @pytest.mark.asyncio
-
 @pytest.mark.asyncio
 async def test_no_eligible_model_raises_error(models):
     # The only available provider does not support vision.
@@ -120,9 +102,7 @@ async def test_no_eligible_model_raises_error(models):
     router = ModelRouter(FakeRedis(models), providers)
 
     with pytest.raises(ValueError, match="No registered model"):
-        await router.route(
-            RoutingCriteria(require_vision=True)
-        )
+        await router.route(RoutingCriteria(require_vision=True))
 
 
 @pytest.mark.asyncio
@@ -132,14 +112,9 @@ async def test_latency_budget_filters_models(models):
     models["text-model"]["estimated_latency_ms"] = 50
     models["fine-tuned-model"]["estimated_latency_ms"] = 200
 
-    providers = {
-        name: object()
-        for name in models
-    }
+    providers = {name: object() for name in models}
     router = ModelRouter(FakeRedis(models), providers)
 
-    result = await router.route(
-        RoutingCriteria(latency_budget_ms=100)
-    )
+    result = await router.route(RoutingCriteria(latency_budget_ms=100))
 
     assert result == "text-model"

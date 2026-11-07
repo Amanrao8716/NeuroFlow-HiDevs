@@ -6,14 +6,15 @@ import hmac
 import json
 import logging
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
+from config import settings
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from observability.metrics import QUALITY_ANOMALIES
 from pydantic import BaseModel, Field
 
-from config import settings
 from backend.models.pipeline import (
     AnalyticsResponse,
     DailyQueryCount,
@@ -27,7 +28,6 @@ from backend.models.pipeline import (
     SuggestionsResponse,
 )
 from backend.services.pipeline_optimizer import PipelineOptimizer
-from observability.metrics import QUALITY_ANOMALIES
 
 try:
     from db.pool import connection, pipeline_connection
@@ -38,7 +38,9 @@ except ImportError:
 from backend.security.auth import get_current_user, require_scope
 from backend.security.validators import sanitize_text
 
-router = APIRouter(prefix="/pipelines", tags=["pipelines"], dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    prefix="/pipelines", tags=["pipelines"], dependencies=[Depends(get_current_user)]
+)
 logger = logging.getLogger("neuroflow.api.pipelines")
 
 
@@ -131,7 +133,7 @@ async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require
     config_obj = payload.to_config()
     config_dict = config_obj.model_dump()
     pipeline_id = uuid4()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async with connection() as conn:
         # Check name uniqueness
@@ -185,7 +187,9 @@ async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require
 
 
 @router.get("", response_model=list[PipelineResponse])
-async def list_pipelines(include_archived: bool = Query(default=False), _scope=Depends(require_scope("query"))):
+async def list_pipelines(
+    include_archived: bool = Query(default=False), _scope=Depends(require_scope("query"))
+):
     """List non-archived pipelines with their current version and configuration."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -248,7 +252,9 @@ async def get_pipeline(pipeline_id: UUID, _scope=Depends(require_scope("query"))
             raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found.")
 
         if row["status"] == "archived":
-            raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} has been archived.")
+            raise HTTPException(
+                status_code=404, detail=f"Pipeline {pipeline_id} has been archived."
+            )
 
         # Compute aggregate evaluation metrics across all runs of this pipeline
         agg = await conn.fetchrow(
@@ -269,11 +275,21 @@ async def get_pipeline(pipeline_id: UUID, _scope=Depends(require_scope("query"))
         cfg_data = json.loads(raw_cfg) if isinstance(raw_cfg, str) else raw_cfg
 
         agg_scores = {
-            "faithfulness": round(agg["avg_faith"], 4) if agg and agg["avg_faith"] is not None else None,
-            "answer_relevance": round(agg["avg_rel"], 4) if agg and agg["avg_rel"] is not None else None,
-            "context_precision": round(agg["avg_prec"], 4) if agg and agg["avg_prec"] is not None else None,
-            "context_recall": round(agg["avg_rec"], 4) if agg and agg["avg_rec"] is not None else None,
-            "overall_score": round(agg["avg_overall"], 4) if agg and agg["avg_overall"] is not None else None,
+            "faithfulness": round(agg["avg_faith"], 4)
+            if agg and agg["avg_faith"] is not None
+            else None,
+            "answer_relevance": round(agg["avg_rel"], 4)
+            if agg and agg["avg_rel"] is not None
+            else None,
+            "context_precision": round(agg["avg_prec"], 4)
+            if agg and agg["avg_prec"] is not None
+            else None,
+            "context_recall": round(agg["avg_rec"], 4)
+            if agg and agg["avg_rec"] is not None
+            else None,
+            "overall_score": round(agg["avg_overall"], 4)
+            if agg and agg["avg_overall"] is not None
+            else None,
         }
 
         return PipelineResponse(
@@ -290,7 +306,9 @@ async def get_pipeline(pipeline_id: UUID, _scope=Depends(require_scope("query"))
 
 
 @router.patch("/{pipeline_id}", response_model=PipelineResponse)
-async def update_pipeline(pipeline_id: UUID, payload: PipelineUpdateRequest, _admin=Depends(require_scope("admin"))):
+async def update_pipeline(
+    pipeline_id: UUID, payload: PipelineUpdateRequest, _admin=Depends(require_scope("admin"))
+):
     """Update pipeline configuration and create a new immutable version.
 
     Nested configuration objects (ingestion, retrieval, generation, evaluation)
@@ -308,9 +326,13 @@ async def update_pipeline(pipeline_id: UUID, payload: PipelineUpdateRequest, _ad
             raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found.")
 
         if row["status"] == "archived":
-            raise HTTPException(status_code=400, detail=f"Cannot update archived pipeline {pipeline_id}.")
+            raise HTTPException(
+                status_code=400, detail=f"Cannot update archived pipeline {pipeline_id}."
+            )
 
-        current_cfg = json.loads(row["config"]) if isinstance(row["config"], str) else dict(row["config"])
+        current_cfg = (
+            json.loads(row["config"]) if isinstance(row["config"], str) else dict(row["config"])
+        )
         current_name = row["name"]
         current_desc = row["description"]
         current_version = row["version"]
@@ -321,7 +343,9 @@ async def update_pipeline(pipeline_id: UUID, payload: PipelineUpdateRequest, _ad
         new_name = sanitize_text(new_name).strip()
         new_desc = sanitize_text(new_desc) if new_desc is not None else None
         if not new_name or len(new_name) > 100:
-            raise HTTPException(status_code=422, detail="Pipeline name must be 1 to 100 characters.")
+            raise HTTPException(
+                status_code=422, detail="Pipeline name must be 1 to 100 characters."
+            )
 
         # Check name conflict if renaming
         if new_name != current_name:
@@ -357,7 +381,7 @@ async def update_pipeline(pipeline_id: UUID, payload: PipelineUpdateRequest, _ad
             ) from exc
 
         new_version = current_version + 1
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         validated_dict = validated_config.model_dump()
 
         async with conn.transaction():
@@ -537,9 +561,7 @@ async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope
         )
 
         retrieval_latencies = [
-            float(r["retrieval_latency_ms"])
-            for r in runs
-            if r["retrieval_latency_ms"] is not None
+            float(r["retrieval_latency_ms"]) for r in runs if r["retrieval_latency_ms"] is not None
         ]
 
         p50 = calculate_percentile(retrieval_latencies, 50)
@@ -552,7 +574,9 @@ async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope
             for r in runs
             if r["latency_ms"] is not None and r["latency_ms"] >= (r["retrieval_latency_ms"] or 0)
         ]
-        avg_gen_latency = round(sum(gen_latencies) / len(gen_latencies), 2) if gen_latencies else None
+        avg_gen_latency = (
+            round(sum(gen_latencies) / len(gen_latencies), 2) if gen_latencies else None
+        )
 
         # Average cost per query
         cost_vals = [float(r["cost_usd"]) for r in runs if r["cost_usd"] is not None]
@@ -574,15 +598,25 @@ async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope
         )
 
         avg_evals = {
-            "faithfulness": round(eval_row["avg_faith"], 4) if eval_row and eval_row["avg_faith"] is not None else None,
-            "answer_relevance": round(eval_row["avg_rel"], 4) if eval_row and eval_row["avg_rel"] is not None else None,
-            "context_precision": round(eval_row["avg_prec"], 4) if eval_row and eval_row["avg_prec"] is not None else None,
-            "context_recall": round(eval_row["avg_rec"], 4) if eval_row and eval_row["avg_rec"] is not None else None,
-            "overall_score": round(eval_row["avg_overall"], 4) if eval_row and eval_row["avg_overall"] is not None else None,
+            "faithfulness": round(eval_row["avg_faith"], 4)
+            if eval_row and eval_row["avg_faith"] is not None
+            else None,
+            "answer_relevance": round(eval_row["avg_rel"], 4)
+            if eval_row and eval_row["avg_rel"] is not None
+            else None,
+            "context_precision": round(eval_row["avg_prec"], 4)
+            if eval_row and eval_row["avg_prec"] is not None
+            else None,
+            "context_recall": round(eval_row["avg_rec"], 4)
+            if eval_row and eval_row["avg_rec"] is not None
+            else None,
+            "overall_score": round(eval_row["avg_overall"], 4)
+            if eval_row and eval_row["avg_overall"] is not None
+            else None,
         }
 
         # 3. 30-day query count and cost buckets
-        thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=29)
+        thirty_days_ago = datetime.now(UTC) - timedelta(days=29)
         daily_rows = await conn.fetch(
             """
             SELECT DATE(created_at) as run_date,
@@ -601,7 +635,9 @@ async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope
         cost_map = {
             str(r["run_date"]): {
                 "avg_cost": round(float(r["avg_cost"]), 6) if r["avg_cost"] is not None else None,
-                "total_cost": round(float(r["total_cost"]), 6) if r["total_cost"] is not None else None,
+                "total_cost": round(float(r["total_cost"]), 6)
+                if r["total_cost"] is not None
+                else None,
             }
             for r in daily_rows
         }
@@ -620,11 +656,13 @@ async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope
 
             c_info = cost_map.get(date_str)
             if c_info and c_info["avg_cost"] is not None:
-                cost_trends.append({
-                    "date": date_str,
-                    "cost_per_query": c_info["avg_cost"],
-                    "total_cost": c_info["total_cost"],
-                })
+                cost_trends.append(
+                    {
+                        "date": date_str,
+                        "cost_per_query": c_info["avg_cost"],
+                        "total_cost": c_info["total_cost"],
+                    }
+                )
 
         # 4. Recent failed runs
         failed_rows = await conn.fetch(
@@ -649,7 +687,7 @@ async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope
         ]
 
         # 5. 7-day daily score trend for sparkline
-        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=6)
+        seven_days_ago = datetime.now(UTC) - timedelta(days=6)
         score_rows = await conn.fetch(
             """
             SELECT DATE(e.evaluated_at) as eval_date, AVG(e.overall_score) as avg_score

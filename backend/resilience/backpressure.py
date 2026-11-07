@@ -23,8 +23,8 @@ it does not affect correctness of the 503 gate.
 
 from __future__ import annotations
 
-import math
 import logging
+import math
 from dataclasses import dataclass
 from enum import Enum
 
@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 INGEST_QUEUE_KEY = "queue:ingest"
 
 # Tier thresholds
-HIGH_THRESHOLD = 100    # reject above this
-WARN_THRESHOLD = 50     # warn above this
+HIGH_THRESHOLD = 100  # reject above this
+WARN_THRESHOLD = 50  # warn above this
 
 # Fallback throughput estimate when worker count is unknown.
 # Conservative: 2 documents processed per minute.
@@ -52,7 +52,7 @@ class QueueStatus(str, Enum):
 class BackpressureResult:
     status: QueueStatus
     queue_depth: int
-    should_reject: bool           # True → return 503 before enqueueing
+    should_reject: bool  # True → return 503 before enqueueing
     warning: str | None = None
     estimated_wait_minutes: int | None = None
     retry_after: int | None = None

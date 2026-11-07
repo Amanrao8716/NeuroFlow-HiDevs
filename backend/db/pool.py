@@ -1,14 +1,11 @@
-
 """Manage the asynchronous PostgreSQL connection pool."""
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 from uuid import UUID
 
 import asyncpg
-
 from config import settings
-
 
 _pool: asyncpg.Pool | None = None
 

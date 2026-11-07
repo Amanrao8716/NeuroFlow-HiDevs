@@ -1,26 +1,28 @@
 """Unit tests for GenerationPipeline orchestration, run persistence, and streaming."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
-import pytest
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
-from pipelines.generation.generator import GenerationPipeline, GenerationResult
+import pytest
+from providers.base import GenerationResult as LLMResult
+
+from pipelines.generation.generator import GenerationPipeline
 from pipelines.retrieval.context_assembler import AssembledContext
 from pipelines.retrieval.query_processor import ProcessedQuery
 from pipelines.retrieval.retriever import RetrievalResult
-from providers.base import GenerationResult as LLMResult
 
 
 @pytest.fixture
 def mock_pipeline_components():
     proc = MagicMock()
-    proc.process = AsyncMock(return_value=ProcessedQuery(
-        query="What is PostgreSQL?",
-        query_type="factual",
-        expanded_queries=["What is PostgreSQL?"],
-        filters={},
-    ))
+    proc.process = AsyncMock(
+        return_value=ProcessedQuery(
+            query="What is PostgreSQL?",
+            query_type="factual",
+            expanded_queries=["What is PostgreSQL?"],
+            filters={},
+        )
+    )
 
     ret = MagicMock()
     chunk1 = RetrievalResult(
@@ -40,30 +42,36 @@ def mock_pipeline_components():
     reranker.rerank = AsyncMock(return_value=[chunk1])
 
     assembler = MagicMock()
-    assembler.assemble = MagicMock(return_value=AssembledContext(
-        context="[Source 1 — postgres.pdf, page 1]\nPostgreSQL is an open-source object-relational database.",
-        chunks_used=1,
-        total_tokens=15,
-        sources=[{
-            "source_index": 1,
-            "chunk_id": "11111111-1111-1111-1111-111111111111",
-            "document_id": "22222222-2222-2222-2222-222222222222",
-            "filename": "postgres.pdf",
-            "page_number": 1,
-            "score": 0.9,
-        }],
-    ))
+    assembler.assemble = MagicMock(
+        return_value=AssembledContext(
+            context="[Source 1 — postgres.pdf, page 1]\nPostgreSQL is an open-source object-relational database.",
+            chunks_used=1,
+            total_tokens=15,
+            sources=[
+                {
+                    "source_index": 1,
+                    "chunk_id": "11111111-1111-1111-1111-111111111111",
+                    "document_id": "22222222-2222-2222-2222-222222222222",
+                    "filename": "postgres.pdf",
+                    "page_number": 1,
+                    "score": 0.9,
+                }
+            ],
+        )
+    )
 
     llm = MagicMock()
-    llm.chat = AsyncMock(return_value=LLMResult(
-        content="PostgreSQL is a powerful relational database [Source 1].",
-        model="gpt-4o-mini",
-        input_tokens=50,
-        output_tokens=15,
-        latency_ms=120.0,
-        cost_usd=0.0001,
-        finish_reason="stop",
-    ))
+    llm.chat = AsyncMock(
+        return_value=LLMResult(
+            content="PostgreSQL is a powerful relational database [Source 1].",
+            model="gpt-4o-mini",
+            input_tokens=50,
+            output_tokens=15,
+            latency_ms=120.0,
+            cost_usd=0.0001,
+            finish_reason="stop",
+        )
+    )
 
     async def mock_stream(*args, **kwargs):
         yield "PostgreSQL "
@@ -117,7 +125,9 @@ async def test_generation_pipeline_runs_and_persists_before_llm(mock_pipeline_co
         return fake_llm_result
 
     pipeline._create_pipeline_run = AsyncMock(side_effect=mock_create)
-    pipeline._update_pipeline_run_success = AsyncMock(side_effect=lambda *args, **kwargs: call_order.append("update_run"))
+    pipeline._update_pipeline_run_success = AsyncMock(
+        side_effect=lambda *args, **kwargs: call_order.append("update_run")
+    )
     mock_pipeline_components["llm"].chat = AsyncMock(side_effect=mock_chat)
 
     p_id = uuid4()

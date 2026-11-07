@@ -1,12 +1,11 @@
-
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from backend.providers.anthropic_provider import AnthropicProvider
 from backend.providers.base import ChatMessage
 from backend.providers.openai_provider import OpenAIProvider
-from backend.providers.anthropic_provider import AnthropicProvider
 
 
 @pytest.mark.asyncio
@@ -34,9 +33,7 @@ async def test_openai_complete_parses_response():
     )
 
     provider = OpenAIProvider(client=client)
-    result = await provider.complete(
-        [ChatMessage(role="user", content="Hi")]
-    )
+    result = await provider.complete([ChatMessage(role="user", content="Hi")])
 
     assert result.content == "Hello!"
     assert result.model == "gpt-4o-mini"
@@ -123,9 +120,7 @@ async def test_openai_complete_forwards_multimodal_content():
         {"type": "text", "text": "Describe this image."},
         {
             "type": "image_url",
-            "image_url": {
-                "url": "data:image/jpeg;base64,dGVzdA=="
-            },
+            "image_url": {"url": "data:image/jpeg;base64,dGVzdA=="},
         },
     ]
 
@@ -152,9 +147,7 @@ async def test_openai_complete_forwards_multimodal_content():
     )
 
     provider = OpenAIProvider(model="gpt-4o", client=client)
-    result = await provider.complete(
-        [ChatMessage(role="user", content=image_content)]
-    )
+    result = await provider.complete([ChatMessage(role="user", content=image_content)])
 
     sent_messages = client.chat.completions.create.call_args.kwargs["messages"]
     assert sent_messages[0]["content"] == image_content
@@ -183,9 +176,7 @@ async def test_neuroflow_client_embed_calls_local_encoder(monkeypatch):
     from backend.providers.client import NeuroFlowClient
 
     fake_vectors = [[0.1] * 384, [0.2] * 384]
-    monkeypatch.setattr(
-        client_module, "_encode_texts", lambda texts: fake_vectors
-    )
+    monkeypatch.setattr(client_module, "_encode_texts", lambda texts: fake_vectors)
 
     fake_redis = AsyncMock()
     client = NeuroFlowClient(fake_redis)

@@ -1,20 +1,15 @@
-
 """Background tasks for document ingestion."""
 
-from datetime import datetime, timezone
 import asyncio
 import json
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import httpx
-from opentelemetry import trace
-from prometheus_client import start_http_server
-from redis.exceptions import RedisError
-
 from config import settings
 from db.pool import connection, pipeline_connection
 from observability.metrics import (
@@ -23,18 +18,22 @@ from observability.metrics import (
     QUEUE_DEPTH,
 )
 from observability.tracing import configure_tracing, extract_trace_context
+from opentelemetry import trace
+from prometheus_client import start_http_server
+from providers.client import NeuroFlowClient
+from redis.exceptions import RedisError
 from resilience.circuit_breaker import CircuitBreakerRegistry
+
+from backend.security.prompt_injection import detect_prompt_injection
+from backend.security.secrets import redact_metadata, redact_secrets
+from backend.security.validators import sanitize_text
+from pipelines.finetuning.tracker import MLflowTracker
+from pipelines.ingestion.chunker import chunk_pages
 from pipelines.ingestion.csv_extractor import extract_csv
 from pipelines.ingestion.docx_extractor import extract_docx
 from pipelines.ingestion.image_extractor import extract_image
 from pipelines.ingestion.pdf_extractor import extract_pdf
 from pipelines.ingestion.url_extractor import extract_url
-from pipelines.ingestion.chunker import chunk_pages
-from pipelines.finetuning.tracker import MLflowTracker
-from providers.client import NeuroFlowClient
-from backend.security.prompt_injection import detect_prompt_injection
-from backend.security.secrets import redact_metadata, redact_secrets
-from backend.security.validators import sanitize_text
 
 logger = logging.getLogger("neuroflow.ingestion")
 tracer = trace.get_tracer("neuroflow.ingestion")
@@ -52,11 +51,15 @@ def secure_extracted_pages(pages, document_id: str):
         page.metadata = redact_metadata(page.metadata)
         if detected_secrets:
             for pattern_type in sorted(set(detected_secrets)):
-                logger.warning(json.dumps({
-                    "event": "secret_redacted",
-                    "document_id": document_id,
-                    "pattern_type": pattern_type,
-                }))
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "secret_redacted",
+                            "document_id": document_id,
+                            "pattern_type": pattern_type,
+                        }
+                    )
+                )
     return pages
 
 
@@ -72,12 +75,8 @@ async def startup(ctx):
     )
     ctx["circuit_breakers"] = CircuitBreakerRegistry(ctx["redis"])
     ctx["metrics_server"], ctx["metrics_thread"] = start_http_server(8001)
-    ctx["evaluation_consumer_task"] = asyncio.create_task(
-        _evaluation_queue_consumer(ctx)
-    )
-    ctx["evaluation_metrics_task"] = asyncio.create_task(
-        _evaluation_metrics_refresher()
-    )
+    ctx["evaluation_consumer_task"] = asyncio.create_task(_evaluation_queue_consumer(ctx))
+    ctx["evaluation_metrics_task"] = asyncio.create_task(_evaluation_metrics_refresher())
     logger.info("Ingestion worker started.")
 
 
@@ -156,9 +155,7 @@ async def _evaluation_queue_consumer(ctx):
                     logger.exception("Evaluation job failed after %s attempts.", attempt)
         finally:
             try:
-                QUEUE_DEPTH.labels(queue="evaluation").set(
-                    await redis.llen(queue_key)
-                )
+                QUEUE_DEPTH.labels(queue="evaluation").set(await redis.llen(queue_key))
             except (RedisError, OSError, TimeoutError):
                 logger.exception("Could not refresh the evaluation queue depth.")
 
@@ -195,9 +192,7 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
     )
     page_count = 0
     embedding_calls = 0
-    QUEUE_DEPTH.labels(queue="ingestion").set(
-        await redis.llen("queue:ingest")
-    )
+    QUEUE_DEPTH.labels(queue="ingestion").set(await redis.llen("queue:ingest"))
 
     with tracer.start_as_current_span("ingestion.process") as span:
         span.set_attribute("document_id", document_id)
@@ -238,8 +233,12 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
             with tracer.start_as_current_span("ingestion.extract"):
                 if source_type == "url":
                     pages = await extract_url(metadata["url"])
-                elif settings.app_env == "production" or os.environ.get("NEUROFLOW_EXTRACTION_SANDBOX", "false").lower() == "true":
+                elif (
+                    settings.app_env == "production"
+                    or os.environ.get("NEUROFLOW_EXTRACTION_SANDBOX", "false").lower() == "true"
+                ):
                     from backend.security.sandbox import DockerExtractionSandbox
+
                     pages = await asyncio.to_thread(
                         DockerExtractionSandbox().extract, source_type, source_bytes
                     )
@@ -282,12 +281,10 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
             embeddings = []
             batch_size = 64
             for start in range(0, len(chunks), batch_size):
-                batch = chunks[start:start + batch_size]
+                batch = chunks[start : start + batch_size]
                 with tracer.start_as_current_span("ingestion.embed") as embed_span:
                     embed_span.set_attribute("embedding.batch_size", len(batch))
-                    vectors = await client.embed(
-                        [chunk["content"] for chunk in batch]
-                    )
+                    vectors = await client.embed([chunk["content"] for chunk in batch])
                 embedding_calls += 1
 
                 if len(vectors) != len(batch):
@@ -327,27 +324,31 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                         """,
                         doc_id,
                         len(chunks),
-                        json.dumps({
-                            "page_count": page_count,
-                            "chunking_strategy": chunks[0]["metadata"].get("strategy"),
-                        }),
+                        json.dumps(
+                            {
+                                "page_count": page_count,
+                                "chunking_strategy": chunks[0]["metadata"].get("strategy"),
+                            }
+                        ),
                     )
 
             span.set_attribute("chunk_count", len(chunks))
             span.set_attribute("embedding_calls", embedding_calls)
 
             duration_ms = round((time.perf_counter() - started) * 1000)
-            logger.info(json.dumps({
-                "event": "ingestion_complete",
-                "document_id": document_id,
-                "duration_ms": duration_ms,
-                "chunks": len(chunks),
-                "tokens": sum(chunk["token_count"] for chunk in chunks),
-            }))
-            INGESTION_DOCUMENTS.labels(status="succeeded").inc()
-            QUEUE_DEPTH.labels(queue="ingestion").set(
-                await redis.llen("queue:ingest")
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "ingestion_complete",
+                        "document_id": document_id,
+                        "duration_ms": duration_ms,
+                        "chunks": len(chunks),
+                        "tokens": sum(chunk["token_count"] for chunk in chunks),
+                    }
+                )
             )
+            INGESTION_DOCUMENTS.labels(status="succeeded").inc()
+            QUEUE_DEPTH.labels(queue="ingestion").set(await redis.llen("queue:ingest"))
 
         except Exception as exc:
             # Exception messages from document parsers can contain source text.
@@ -366,9 +367,7 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                 )
 
             INGESTION_DOCUMENTS.labels(status="failed").inc()
-            QUEUE_DEPTH.labels(queue="ingestion").set(
-                await redis.llen("queue:ingest")
-            )
+            QUEUE_DEPTH.labels(queue="ingestion").set(await redis.llen("queue:ingest"))
             raise
 
 
@@ -406,8 +405,8 @@ async def evaluate_pipeline_run(
             async with pipeline_connection(UUID(pipeline_id)) as conn:
                 from observability.quality import (
                     detect_quality_anomaly,
-                    remember_pipeline_for_refresh,
                     refresh_rolling_evaluation_metrics,
+                    remember_pipeline_for_refresh,
                 )
 
                 remember_pipeline_for_refresh(pipeline_id)
@@ -452,7 +451,7 @@ async def evaluate_pipeline_run(
 
             # Publish evaluation event to Redis pub/sub channel 'evaluations:new'
             eval_dict = report.to_dict()
-            eval_dict["evaluated_at"] = datetime.now(timezone.utc).isoformat()
+            eval_dict["evaluated_at"] = datetime.now(UTC).isoformat()
             if redis:
                 try:
                     # Enrich with query and pipeline name if database is reachable
@@ -479,7 +478,9 @@ async def evaluate_pipeline_run(
                             logger.debug("Could not enrich eval payload: %s", enrich_err)
 
                     await redis.publish("evaluations:new", json.dumps(eval_dict))
-                    logger.info("Published evaluation for run %s to Redis channel evaluations:new", run_id)
+                    logger.info(
+                        "Published evaluation for run %s to Redis channel evaluations:new", run_id
+                    )
                 except Exception as pub_err:
                     logger.warning("Failed to publish evaluation to evaluations:new: %s", pub_err)
 
@@ -546,6 +547,7 @@ async def _submit_quality_anomaly(
 async def poll_finetune_job(ctx, job_id: str, openai_client: Any = None):
     """Poll asynchronous provider fine-tuning job status and handle terminal states."""
     import os
+
     from openai import AsyncOpenAI
 
     jid = UUID(job_id)
@@ -588,14 +590,17 @@ async def poll_finetune_job(ctx, job_id: str, openai_client: Any = None):
             remote_job = await client.fine_tuning.jobs.retrieve(provider_job_id)
         except Exception as exc:
             logger.warning("Transient error polling provider job %s: %s", provider_job_id, exc)
-            from arq.connections import create_pool, RedisSettings
+            from arq.connections import RedisSettings, create_pool
             from config import settings
-            pool = await create_pool(RedisSettings(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                password=settings.redis_password,
-                database=0,
-            ))
+
+            pool = await create_pool(
+                RedisSettings(
+                    host=settings.redis_host,
+                    port=settings.redis_port,
+                    password=settings.redis_password,
+                    database=0,
+                )
+            )
             try:
                 await pool.enqueue_job("poll_finetune_job", job_id, _defer_by=60)
             finally:
@@ -606,7 +611,10 @@ async def poll_finetune_job(ctx, job_id: str, openai_client: Any = None):
         logger.info("Polled job %s -> remote status: %s", job_id, remote_status)
 
         if remote_status == "succeeded":
-            ft_model = getattr(remote_job, "fine_tuned_model", None) or f"ft:{job_row['base_model']}:{job_id}"
+            ft_model = (
+                getattr(remote_job, "fine_tuned_model", None)
+                or f"ft:{job_row['base_model']}:{job_id}"
+            )
             trained_tokens = getattr(remote_job, "trained_tokens", None)
             metrics = {}
             if hasattr(remote_job, "training_metrics"):
@@ -663,7 +671,9 @@ async def poll_finetune_job(ctx, job_id: str, openai_client: Any = None):
 
         elif remote_status in ("failed", "cancelled"):
             err_obj = getattr(remote_job, "error", None)
-            err_msg = str(getattr(err_obj, "message", err_obj) or f"Fine-tuning job {remote_status}")[:500]
+            err_msg = str(
+                getattr(err_obj, "message", err_obj) or f"Fine-tuning job {remote_status}"
+            )[:500]
 
             async with connection() as conn:
                 await conn.execute(
@@ -693,14 +703,17 @@ async def poll_finetune_job(ctx, job_id: str, openai_client: Any = None):
             return {"status": remote_status, "error": err_msg}
 
         else:
-            from arq.connections import create_pool, RedisSettings
+            from arq.connections import RedisSettings, create_pool
             from config import settings
-            pool = await create_pool(RedisSettings(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                password=settings.redis_password,
-                database=0,
-            ))
+
+            pool = await create_pool(
+                RedisSettings(
+                    host=settings.redis_host,
+                    port=settings.redis_port,
+                    password=settings.redis_password,
+                    database=0,
+                )
+            )
             try:
                 await pool.enqueue_job("poll_finetune_job", job_id, _defer_by=60)
             finally:

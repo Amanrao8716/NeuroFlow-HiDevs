@@ -3,12 +3,13 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
+
 import pytest
 from httpx import ASGITransport, AsyncClient
-
 from main import app
-from pipelines.generation.generator import GenerationPipeline, GenerationResult
+
 from pipelines.generation.citations import Citation, ParsedCitations
+from pipelines.generation.generator import GenerationPipeline, GenerationResult
 
 
 @pytest.fixture
@@ -32,20 +33,22 @@ def mock_pipeline():
         cited_chunk_ids=[str(uuid4())],
     )
 
-    pipeline.generate = AsyncMock(return_value=GenerationResult(
-        run_id=str(uuid4()),
-        query="What is pgvector?",
-        query_type="factual",
-        generation="pgvector is an extension [Source 1].",
-        citations=fake_citations,
-        sources=[{"filename": "doc.pdf"}],
-        chunks_used=1,
-        input_tokens=100,
-        output_tokens=20,
-        latency_ms=150,
-        model_used="gpt-4o-mini",
-        status="completed",
-    ))
+    pipeline.generate = AsyncMock(
+        return_value=GenerationResult(
+            run_id=str(uuid4()),
+            query="What is pgvector?",
+            query_type="factual",
+            generation="pgvector is an extension [Source 1].",
+            citations=fake_citations,
+            sources=[{"filename": "doc.pdf"}],
+            chunks_used=1,
+            input_tokens=100,
+            output_tokens=20,
+            latency_ms=150,
+            model_used="gpt-4o-mini",
+            status="completed",
+        )
+    )
 
     async def fake_stream_events(*args, **kwargs):
         yield {"type": "retrieval_start"}
@@ -110,9 +113,7 @@ async def test_post_query_stream_flow(mock_pipeline):
 
             lines = stream_resp.text.split("\n")
             event_data_lines = [
-                line.replace("data: ", "").strip()
-                for line in lines
-                if line.startswith("data: ")
+                line.replace("data: ", "").strip() for line in lines if line.startswith("data: ")
             ]
 
             parsed_events = [json.loads(d) for d in event_data_lines if d]

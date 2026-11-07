@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: write
-  pull-requests: read
+  id-token: write
 
 jobs:
   release:
@@ -22,26 +22,29 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: python -m pip install python-semantic-release
-      - name: Apply PR label to release commit
+      - name: Select version increment from merged PR label
+        id: bump
         env:
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
-          label=$(python -c 'import json,os; labels=json.loads(os.environ["LABELS"]); print(next((x for x in ("breaking", "feature", "fix") if x in labels), ""))')
-          case "$label" in
-            breaking) prefix='feat!:' ;;
-            feature) prefix='feat:' ;;
-            fix) prefix='fix:' ;;
-            *) exit 0 ;;
-          esac
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git commit --allow-empty -m "$prefix $PR_TITLE"
-          git push origin main
-      - uses: python-semantic-release/python-semantic-release@v9.21.1
+          python - <<'PY'
+          import json
+          import os
+
+          labels = json.loads(os.environ["PR_LABELS"])
+          bump = next(
+              (value for label, value in (("breaking", "major"), ("feature", "minor"), ("fix", "patch")) if label in labels),
+              None,
+          )
+          if bump is None:
+              raise SystemExit("Merged PR requires breaking, feature, or fix label")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"force={bump}\n")
+          PY
+      - name: Create version, changelog, tag, and GitHub release
+        uses: python-semantic-release/python-semantic-release@v10.7.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          force: ${{ steps.bump.outputs.force }}
+          changelog: "true"
+          vcs_release: "true"

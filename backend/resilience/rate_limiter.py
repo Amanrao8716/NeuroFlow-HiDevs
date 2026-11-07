@@ -38,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +47,13 @@ logger = logging.getLogger(__name__)
 # Provider-specific configuration
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BucketConfig:
     """Token-bucket parameters for a named provider or pipeline."""
-    capacity: float         # maximum tokens in the bucket
-    refill_rate: float      # tokens added per second
+
+    capacity: float  # maximum tokens in the bucket
+    refill_rate: float  # tokens added per second
     cost_per_request: float = 1.0
 
     def key_prefix(self, name: str) -> str:
@@ -61,14 +63,14 @@ class BucketConfig:
 # Preset for global OpenAI limits (per task spec)
 OPENAI_CONFIG = BucketConfig(
     capacity=3_000.0,
-    refill_rate=50.0,       # 3000 tokens / 60s = 50 /s
+    refill_rate=50.0,  # 3000 tokens / 60s = 50 /s
     cost_per_request=1.0,
 )
 
 # Anthropic has no fixed public limit; use a generous default.
 ANTHROPIC_CONFIG = BucketConfig(
     capacity=1_000.0,
-    refill_rate=16.67,      # 1000 / 60s
+    refill_rate=16.67,  # 1000 / 60s
     cost_per_request=1.0,
 )
 
@@ -85,8 +87,7 @@ class RateLimitExceeded(Exception):
         self.bucket = bucket
         self.retry_after = retry_after
         super().__init__(
-            f"Rate limit exceeded for bucket '{bucket}'. "
-            f"Retry after {retry_after:.1f}s."
+            f"Rate limit exceeded for bucket '{bucket}'. Retry after {retry_after:.1f}s."
         )
 
 
@@ -145,7 +146,7 @@ class RateLimiter:
         *,
         config: BucketConfig | None = None,
         max_wait_seconds: float = 60.0,
-        _clock=None,            # injectable for tests
+        _clock=None,  # injectable for tests
     ) -> None:
         self._redis = redis
         self._name = name
@@ -231,6 +232,7 @@ class RateLimiter:
 # ---------------------------------------------------------------------------
 # Pipeline-scoped rate limiter factory
 # ---------------------------------------------------------------------------
+
 
 def pipeline_rate_limiter(
     redis,

@@ -1,8 +1,6 @@
-
 """arq configuration for the NeuroFlow ingestion worker."""
 
 from arq.connections import RedisSettings
-
 from config import settings
 from worker.tasks import (
     evaluate_pipeline_run,

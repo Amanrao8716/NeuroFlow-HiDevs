@@ -1,14 +1,13 @@
 """Unit and Integration tests for Pipeline CRUD, Versioning, History, Analytics, and Suggestions API."""
 
-import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
-from fastapi.testclient import TestClient
 
-from main import app
+import pytest
 from api.pipelines import calculate_percentile, calculate_token_cost
-from backend.models.pipeline import PipelineConfig
+from fastapi.testclient import TestClient
+from main import app
 
 
 @pytest.fixture
@@ -19,6 +18,7 @@ def client():
 # -------------------------------------------------------------------------
 # Deterministic Math / Utility Tests
 # -------------------------------------------------------------------------
+
 
 def test_calculate_percentile_deterministic():
     """Verify linear interpolation percentile calculation across edge cases."""
@@ -62,6 +62,7 @@ def test_calculate_token_cost_pricing():
 # Helper Mock Fixture
 # -------------------------------------------------------------------------
 
+
 def _create_mock_db_context(mock_conn):
     mock_ctx = MagicMock()
     mock_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
@@ -75,8 +76,10 @@ def _create_mock_db_context(mock_conn):
     class MockPoolManager:
         def __call__(self, *args, **kwargs):
             return mock_ctx
+
         async def __aenter__(self):
             return mock_conn
+
         async def __aexit__(self, *args):
             return None
 
@@ -87,6 +90,7 @@ def _create_mock_db_context(mock_conn):
 # API Tests with Mocked DB Connection
 # -------------------------------------------------------------------------
 
+
 def test_create_pipeline_api(client):
     """POST /pipelines creates a pipeline and initial version record."""
     mock_conn = AsyncMock()
@@ -94,8 +98,10 @@ def test_create_pipeline_api(client):
 
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    with patch("api.pipelines.pipeline_connection", mock_mgr), \
-         patch("api.pipelines.connection", mock_mgr):
+    with (
+        patch("api.pipelines.pipeline_connection", mock_mgr),
+        patch("api.pipelines.connection", mock_mgr),
+    ):
         response = client.post(
             "/pipelines",
             json={
@@ -131,7 +137,6 @@ def test_create_pipeline_api(client):
         assert data["status"] == "active"
 
 
-
 def test_list_pipelines_api(client):
     """GET /pipelines lists non-archived pipelines with metrics."""
     pid1 = uuid4()
@@ -151,17 +156,19 @@ def test_list_pipelines_api(client):
                 "generation": {},
                 "evaluation": {},
             },
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
             "run_count": 15,
-            "last_run_at": datetime.now(timezone.utc),
+            "last_run_at": datetime.now(UTC),
         }
     ]
 
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    with patch("api.pipelines.connection", mock_mgr), \
-         patch("api.pipelines.pipeline_connection", mock_mgr):
+    with (
+        patch("api.pipelines.connection", mock_mgr),
+        patch("api.pipelines.pipeline_connection", mock_mgr),
+    ):
         response = client.get("/pipelines")
         assert response.status_code == 200
         items = response.json()
@@ -185,14 +192,18 @@ def test_get_pipeline_detail_api(client):
             "config": {
                 "name": "Pipeline Detail",
                 "description": "Detailed view",
-                "ingestion": {"chunking_strategy": "auto", "chunk_size_tokens": 512, "chunk_overlap_tokens": 50},
+                "ingestion": {
+                    "chunking_strategy": "auto",
+                    "chunk_size_tokens": 512,
+                    "chunk_overlap_tokens": 50,
+                },
                 "retrieval": {"dense_k": 20},
                 "generation": {"temperature": 0.2},
                 "evaluation": {"training_threshold": 0.8},
             },
             "status": "active",
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
         },
         # Second call: aggregate evaluation scores
         {
@@ -207,8 +218,10 @@ def test_get_pipeline_detail_api(client):
 
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    with patch("api.pipelines.pipeline_connection", mock_mgr), \
-         patch("api.pipelines.connection", mock_mgr):
+    with (
+        patch("api.pipelines.pipeline_connection", mock_mgr),
+        patch("api.pipelines.connection", mock_mgr),
+    ):
         response = client.get(f"/pipelines/{pid}")
         assert response.status_code == 200
         data = response.json()
@@ -225,8 +238,10 @@ def test_get_missing_pipeline_returns_404(client):
 
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    with patch("api.pipelines.pipeline_connection", mock_mgr), \
-         patch("api.pipelines.connection", mock_mgr):
+    with (
+        patch("api.pipelines.pipeline_connection", mock_mgr),
+        patch("api.pipelines.connection", mock_mgr),
+    ):
         response = client.get(f"/pipelines/{missing_id}")
         assert response.status_code == 404
 
@@ -281,16 +296,21 @@ def test_patch_pipeline_creates_new_version(client):
             "description": "Original",
             "version": 2,
             "status": "active",
-            "config": {**current_config, "retrieval": {**current_config["retrieval"], "dense_k": 30}},
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc),
+            "config": {
+                **current_config,
+                "retrieval": {**current_config["retrieval"], "dense_k": 30},
+            },
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
         },
     ]
 
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    with patch("api.pipelines.pipeline_connection", mock_mgr), \
-         patch("api.pipelines.connection", mock_mgr):
+    with (
+        patch("api.pipelines.pipeline_connection", mock_mgr),
+        patch("api.pipelines.connection", mock_mgr),
+    ):
         response = client.patch(
             f"/pipelines/{pid}",
             json={
@@ -327,14 +347,16 @@ def test_soft_delete_pipeline_archives(client):
             "evaluation": {},
         },
         "status": "active",
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
     }
 
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    with patch("api.pipelines.pipeline_connection", mock_mgr), \
-         patch("api.pipelines.connection", mock_mgr):
+    with (
+        patch("api.pipelines.pipeline_connection", mock_mgr),
+        patch("api.pipelines.connection", mock_mgr),
+    ):
         response = client.delete(f"/pipelines/{pid}")
         assert response.status_code == 200
         data = response.json()
@@ -364,7 +386,7 @@ def test_paginated_runs_api(client):
             "cost_usd": 0.008,
             "model_used": "gpt-4o",
             "status": "completed",
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
             "faithfulness": 0.95,
             "answer_relevance": 0.90,
             "context_precision": 0.85,
@@ -376,8 +398,10 @@ def test_paginated_runs_api(client):
 
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    with patch("api.pipelines.pipeline_connection", mock_mgr), \
-         patch("api.pipelines.connection", mock_mgr):
+    with (
+        patch("api.pipelines.pipeline_connection", mock_mgr),
+        patch("api.pipelines.connection", mock_mgr),
+    ):
         response = client.get(f"/pipelines/{pid}/runs?page=1&page_size=10")
         assert response.status_code == 200
         data = response.json()
@@ -410,20 +434,38 @@ def test_pipeline_analytics_with_data(client):
     mock_conn.fetch.side_effect = [
         # Latencies & tokens
         [
-            {"retrieval_latency_ms": 20, "latency_ms": 100, "input_tokens": 500, "output_tokens": 100, "cost_usd": 0.004},
-            {"retrieval_latency_ms": 40, "latency_ms": 150, "input_tokens": 600, "output_tokens": 120, "cost_usd": 0.005},
-            {"retrieval_latency_ms": 60, "latency_ms": 200, "input_tokens": 700, "output_tokens": 140, "cost_usd": 0.006},
+            {
+                "retrieval_latency_ms": 20,
+                "latency_ms": 100,
+                "input_tokens": 500,
+                "output_tokens": 100,
+                "cost_usd": 0.004,
+            },
+            {
+                "retrieval_latency_ms": 40,
+                "latency_ms": 150,
+                "input_tokens": 600,
+                "output_tokens": 120,
+                "cost_usd": 0.005,
+            },
+            {
+                "retrieval_latency_ms": 60,
+                "latency_ms": 200,
+                "input_tokens": 700,
+                "output_tokens": 140,
+                "cost_usd": 0.006,
+            },
         ],
         # Daily counts include a day without recorded costs and a day with real cost data.
         [
             {
-                "run_date": datetime.now(timezone.utc).date() - timedelta(days=1),
+                "run_date": datetime.now(UTC).date() - timedelta(days=1),
                 "query_count": 2,
                 "avg_cost": None,
                 "total_cost": None,
             },
             {
-                "run_date": datetime.now(timezone.utc).date(),
+                "run_date": datetime.now(UTC).date(),
                 "query_count": 3,
                 "avg_cost": 0.005,
                 "total_cost": 0.015,
@@ -437,8 +479,10 @@ def test_pipeline_analytics_with_data(client):
 
     mock_mgr = _create_mock_db_context(mock_conn)
 
-    with patch("api.pipelines.pipeline_connection", mock_mgr), \
-         patch("api.pipelines.connection", mock_mgr):
+    with (
+        patch("api.pipelines.pipeline_connection", mock_mgr),
+        patch("api.pipelines.connection", mock_mgr),
+    ):
         response = client.get(f"/pipelines/{pid}/analytics")
         assert response.status_code == 200
         data = response.json()
@@ -452,7 +496,7 @@ def test_pipeline_analytics_with_data(client):
         assert len(data["daily_query_counts"]) == 30
         assert data["cost_trends_30d"] == [
             {
-                "date": datetime.now(timezone.utc).date().isoformat(),
+                "date": datetime.now(UTC).date().isoformat(),
                 "cost_per_query": 0.005,
                 "total_cost": 0.015,
             }

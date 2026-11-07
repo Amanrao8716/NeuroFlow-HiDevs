@@ -7,10 +7,14 @@ import os
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from backend.security.auth import require_scope
+from backend.security.prompt_injection import classify_query, detect_prompt_injection
+from backend.security.secrets import redact_secrets
+from backend.security.validators import sanitize_text
 from pipelines.retrieval import (
     ContextAssembler,
     CrossEncoderReranker,
@@ -18,11 +22,6 @@ from pipelines.retrieval import (
     QueryProcessor,
     reciprocal_rank_fusion,
 )
-
-from backend.security.auth import require_scope
-from backend.security.prompt_injection import classify_query, detect_prompt_injection
-from backend.security.validators import sanitize_text
-from backend.security.secrets import redact_secrets
 
 router = APIRouter(tags=["retrieval"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.retrieve")
@@ -98,17 +97,25 @@ async def retrieve_endpoint(request: RetrieveRequest, req: Request):
         if detection.detected:
             logger.warning("User query matched prompt injection signal %s", detection.pattern)
         from api.query import get_generation_pipeline
+
         try:
-            if await classify_query(getattr(get_generation_pipeline(req), "client", None), query_text):
-                return JSONResponse(status_code=400, content={"error": "query_rejected", "reason": "potential_prompt_injection"})
+            if await classify_query(
+                getattr(get_generation_pipeline(req), "client", None), query_text
+            ):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "query_rejected", "reason": "potential_prompt_injection"},
+                )
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning("Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__)
-            raise HTTPException(status_code=503, detail="Query security classification unavailable.") from exc
-        processed = await _processor.process(
-            query_text, explicit_filters=request.filters
-        )
+            logger.warning(
+                "Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__
+            )
+            raise HTTPException(
+                status_code=503, detail="Query security classification unavailable."
+            ) from exc
+        processed = await _processor.process(query_text, explicit_filters=request.filters)
 
         # 2. Parallel Multi-Method Retrieval (Dense, Sparse, Metadata)
         dense_res, sparse_res, meta_res = await _retriever.retrieve_parallel(
@@ -137,9 +144,7 @@ async def retrieve_endpoint(request: RetrieveRequest, req: Request):
         top_candidates = candidates[: request.top_k]
 
         # 5. Context Assembly with Token Budget
-        assembled = _assembler.assemble(
-            top_candidates, max_tokens=request.max_context_tokens
-        )
+        assembled = _assembler.assemble(top_candidates, max_tokens=request.max_context_tokens)
 
         chunk_responses = [
             ChunkResponse(
@@ -170,9 +175,7 @@ async def retrieve_endpoint(request: RetrieveRequest, req: Request):
 
     except Exception as exc:
         logger.exception("Retrieval pipeline failed for query '%s'", request.query)
-        raise HTTPException(
-            status_code=500, detail=f"Retrieval failed: {str(exc)}"
-        ) from exc
+        raise HTTPException(status_code=500, detail=f"Retrieval failed: {str(exc)}") from exc
 
 
 @router.post("/__test__/retrieval-rankings", response_model=RetrievalRankingResponse)
@@ -200,14 +203,19 @@ async def retrieval_rankings_for_test(
     if detection.detected:
         raise HTTPException(status_code=400, detail="Benchmark query rejected by security policy.")
     from api.query import get_generation_pipeline
+
     try:
         if await classify_query(getattr(get_generation_pipeline(req), "client", None), query_text):
-            raise HTTPException(status_code=400, detail="Benchmark query rejected by security policy.")
+            raise HTTPException(
+                status_code=400, detail="Benchmark query rejected by security policy."
+            )
     except HTTPException:
         raise
     except Exception as exc:
         logger.warning("Benchmark query classifier unavailable (%s).", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Query security classification unavailable.") from exc
+        raise HTTPException(
+            status_code=503, detail="Query security classification unavailable."
+        ) from exc
 
     processed = await _processor.process(query_text, explicit_filters=request.filters)
     dense, sparse, _metadata = await _retriever.retrieve_parallel(

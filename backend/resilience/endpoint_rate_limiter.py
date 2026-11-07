@@ -37,7 +37,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
@@ -72,19 +72,15 @@ end
 
 @dataclass
 class RouteLimit:
-    limit: int          # max requests
-    window_s: int       # window in seconds
-    route_key: str      # used in Redis key
+    limit: int  # max requests
+    window_s: int  # window in seconds
+    route_key: str  # used in Redis key
 
 
 # Route configuration
 ROUTE_LIMITS: dict[str, RouteLimit] = {
-    "POST:/ingest": RouteLimit(
-        limit=10, window_s=3600, route_key="ingest"
-    ),
-    "POST:/query": RouteLimit(
-        limit=60, window_s=60, route_key="query"
-    ),
+    "POST:/ingest": RouteLimit(limit=10, window_s=3600, route_key="ingest"),
+    "POST:/query": RouteLimit(limit=60, window_s=60, route_key="query"),
 }
 
 
@@ -213,7 +209,6 @@ class RateLimitMiddleware:
             return
 
         from starlette.requests import Request as StarletteRequest
-        from starlette.applications import Starlette
 
         request = StarletteRequest(scope, receive)
 

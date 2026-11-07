@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi.testclient import TestClient
-
-from main import app
 from api import pipelines as pipelines_api
-
+from fastapi.testclient import TestClient
+from main import app
 
 client = TestClient(app)
 
@@ -61,7 +58,7 @@ async def test_internal_suggestions_persists_anomaly_and_optimizer_results(monke
     pipeline_id = uuid4()
     run_id = uuid4()
     anomaly_id = uuid4()
-    created_at = datetime.now(timezone.utc)
+    created_at = datetime.now(UTC)
     inserted = {
         "id": anomaly_id,
         "run_id": run_id,
@@ -124,9 +121,7 @@ async def test_internal_suggestions_persists_anomaly_and_optimizer_results(monke
     assert response.recorded is True
     assert response.cooldown_suppressed is False
     assert response.id == anomaly_id
-    assert conn.execute.await_args.args[0].startswith(
-        "SELECT pg_advisory_xact_lock"
-    )
+    assert conn.execute.await_args.args[0].startswith("SELECT pg_advisory_xact_lock")
 
 
 @pytest.mark.asyncio
@@ -140,7 +135,7 @@ async def test_internal_suggestions_suppresses_anomaly_during_cooldown(monkeypat
         "baseline_mean": 0.8,
         "baseline_stddev": 0.1,
         "suggestions": [],
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
     }
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
@@ -303,25 +298,28 @@ def test_patch_rating_values():
     pipeline_id = uuid4()
 
     mock_conn = MagicMock()
-    mock_conn.fetchrow = AsyncMock(return_value={
-        "id": uuid4(),
-        "faithfulness": 0.85,
-        "answer_relevance": 0.88,
-        "context_precision": 0.75,
-        "context_recall": 0.80,
-        "overall_score": 0.83,
-        "judge_model": "gpt-4o",
-        "user_rating": None,
-    })
+    mock_conn.fetchrow = AsyncMock(
+        return_value={
+            "id": uuid4(),
+            "faithfulness": 0.85,
+            "answer_relevance": 0.88,
+            "context_precision": 0.75,
+            "context_recall": 0.80,
+            "overall_score": 0.83,
+            "judge_model": "gpt-4o",
+            "user_rating": None,
+        }
+    )
     mock_conn.execute = AsyncMock()
 
     @asynccontextmanager
     async def mock_pipeline_connection(p_id):
         yield mock_conn
 
-    with patch("api.evaluations.pipeline_connection", mock_pipeline_connection), \
-         patch("api.evaluations._resolve_pipeline_id", AsyncMock(return_value=pipeline_id)):
-
+    with (
+        patch("api.evaluations.pipeline_connection", mock_pipeline_connection),
+        patch("api.evaluations._resolve_pipeline_id", AsyncMock(return_value=pipeline_id)),
+    ):
         # Thumbs up: rating = 5
         res_up = client.patch(
             f"/runs/{run_id}/rating",

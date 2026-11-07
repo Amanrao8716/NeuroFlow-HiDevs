@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Any
 
-from backend.models.pipeline import PipelineConfig, SuggestionItem
+from backend.models.pipeline import SuggestionItem
 
 logger = logging.getLogger("neuroflow.services.optimizer")
 

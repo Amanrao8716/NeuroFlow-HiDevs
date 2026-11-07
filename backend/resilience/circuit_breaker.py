@@ -34,9 +34,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import AsyncGenerator
 
 from observability.metrics import (
     CIRCUIT_BREAKER_TRIPS,
@@ -266,7 +266,7 @@ class CircuitBreaker:
     async def state(self) -> CircuitState:
         """Return the current circuit state (may trigger OPEN->HALF_OPEN)."""
         raw = await self._redis.get(self._k_state)
-        s = (raw or "closed")
+        s = raw or "closed"
         if s == CircuitState.OPEN:
             # Check recovery timeout
             await self._load_scripts()
@@ -287,7 +287,6 @@ class CircuitBreaker:
             return CircuitState(s)
         except ValueError:
             return CircuitState.OPEN
-
 
     async def get_info(self) -> dict:
         """Return observable state for the health endpoint."""
@@ -398,6 +397,7 @@ class CircuitBreaker:
 # ---------------------------------------------------------------------------
 # Module-level factory
 # ---------------------------------------------------------------------------
+
 
 class CircuitBreakerRegistry:
     """

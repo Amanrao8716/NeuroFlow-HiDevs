@@ -1,13 +1,12 @@
-
 """API endpoints for asynchronous document ingestion."""
 
 import hashlib
 import json
 import logging
-from pathlib import Path
-from uuid import UUID
 import zipfile
 from io import BytesIO
+from pathlib import Path
+from uuid import UUID
 
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -15,13 +14,11 @@ from config import settings
 from db.pool import pipeline_connection
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, HttpUrl
-
 from resilience.backpressure import BackpressureGuard, QueueStatus
 
 from backend.security.auth import get_current_user, require_scope
-from backend.security.validators import validate_public_url
 from backend.security.secrets import redact_secrets
-from backend.security.validators import sanitize_text
+from backend.security.validators import sanitize_text, validate_public_url
 
 router = APIRouter(tags=["ingestion"], dependencies=[Depends(get_current_user)])
 logger = logging.getLogger(__name__)
@@ -45,31 +42,45 @@ def _validate_document(content_type: str | None, extension: str, data: bytes) ->
         ".pdf": {"application/pdf"},
         ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
         ".csv": {"text/csv", "application/csv", "application/vnd.ms-excel", "text/plain"},
-        ".jpg": {"image/jpeg"}, ".jpeg": {"image/jpeg"},
-        ".png": {"image/png"}, ".webp": {"image/webp"},
+        ".jpg": {"image/jpeg"},
+        ".jpeg": {"image/jpeg"},
+        ".png": {"image/png"},
+        ".webp": {"image/webp"},
     }
     if content_type not in mime_by_extension.get(extension, set()):
-        raise HTTPException(status_code=415, detail="Declared MIME type does not match the file type.")
+        raise HTTPException(
+            status_code=415, detail="Declared MIME type does not match the file type."
+        )
     valid = {
         ".pdf": data.startswith(b"%PDF-") and b"/JavaScript" not in data and b"/JS" not in data,
         ".docx": data.startswith(b"PK\x03\x04") and b"[Content_Types].xml" in data[:65536],
-        ".csv": not data.startswith((b"MZ", b"\x7fELF", b"PK\x03\x04")) and b"\x00" not in data[:8192],
-        ".jpg": data.startswith(b"\xff\xd8\xff"), ".jpeg": data.startswith(b"\xff\xd8\xff"),
+        ".csv": not data.startswith((b"MZ", b"\x7fELF", b"PK\x03\x04"))
+        and b"\x00" not in data[:8192],
+        ".jpg": data.startswith(b"\xff\xd8\xff"),
+        ".jpeg": data.startswith(b"\xff\xd8\xff"),
         ".png": data.startswith(b"\x89PNG\r\n\x1a\n"),
         ".webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP",
     }
     if not valid.get(extension, False):
-        raise HTTPException(status_code=415, detail="File signature does not match a supported document.")
+        raise HTTPException(
+            status_code=415, detail="File signature does not match a supported document."
+        )
     if extension == ".docx":
         try:
             with zipfile.ZipFile(BytesIO(data)) as archive:
                 entries = archive.infolist()
-                if len(entries) > 1000 or not any(item.filename == "[Content_Types].xml" for item in entries):
+                if len(entries) > 1000 or not any(
+                    item.filename == "[Content_Types].xml" for item in entries
+                ):
                     raise ValueError("Invalid archive layout.")
                 expanded = 0
                 for item in entries:
                     path = Path(item.filename)
-                    if path.is_absolute() or ".." in path.parts or item.filename.lower().endswith((".zip", ".7z", ".rar")):
+                    if (
+                        path.is_absolute()
+                        or ".." in path.parts
+                        or item.filename.lower().endswith((".zip", ".7z", ".rar"))
+                    ):
                         raise ValueError("Unsafe archive member.")
                     expanded += item.file_size
                     if item.file_size > 0 and item.compress_size == 0:
@@ -82,7 +93,9 @@ def _validate_document(content_type: str | None, extension: str, data: bytes) ->
                 if bad_member:
                     raise ValueError("Corrupt archive member.")
         except (zipfile.BadZipFile, RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=415, detail="DOCX archive is malformed or unsafe.") from exc
+            raise HTTPException(
+                status_code=415, detail="DOCX archive is malformed or unsafe."
+            ) from exc
 
 
 class URLIngestRequest(BaseModel):
@@ -207,6 +220,7 @@ async def ingest_file(
         bp_result = await bp.check()
         if bp_result.should_reject:
             from fastapi.responses import JSONResponse
+
             return JSONResponse(
                 status_code=503,
                 content={
@@ -238,9 +252,7 @@ async def ingest_file(
                 WHERE id = $1
                 """,
                 document_id,
-                json.dumps(
-                    {"error": "Failed to enqueue ingestion job"}
-                ),
+                json.dumps({"error": "Failed to enqueue ingestion job"}),
             )
 
         raise HTTPException(
@@ -270,13 +282,11 @@ async def ingest_url(
     try:
         validate_public_url(normalized_url)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="URL is not an allowed public destination.") from exc
-    content_hash = hashlib.sha256(
-        normalized_url.encode("utf-8")
-    ).hexdigest()
-    filename = (
-        Path(normalized_url.split("?", 1)[0]).name or "webpage"
-    )
+        raise HTTPException(
+            status_code=400, detail="URL is not an allowed public destination."
+        ) from exc
+    content_hash = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()
+    filename = Path(normalized_url.split("?", 1)[0]).name or "webpage"
 
     async with pipeline_connection(payload.pipeline_id) as conn:
         existing = await conn.fetchrow(
@@ -319,6 +329,7 @@ async def ingest_url(
         bp_result = await bp.check()
         if bp_result.should_reject:
             from fastapi.responses import JSONResponse
+
             return JSONResponse(
                 status_code=503,
                 content={
@@ -350,9 +361,7 @@ async def ingest_url(
                 WHERE id = $1
                 """,
                 document_id,
-                json.dumps(
-                    {"error": "Failed to enqueue ingestion job"}
-                ),
+                json.dumps({"error": "Failed to enqueue ingestion job"}),
             )
 
         raise HTTPException(
@@ -441,7 +450,9 @@ async def list_documents(
             "source_type": r["source_type"],
             "status": r["status"],
             "chunk_count": r["chunk_count"] or 0,
-            "metadata": r["metadata"] if isinstance(r["metadata"], dict) else json.loads(r["metadata"] or "{}"),
+            "metadata": r["metadata"]
+            if isinstance(r["metadata"], dict)
+            else json.loads(r["metadata"] or "{}"),
             "created_at": r["created_at"].isoformat(),
         }
         for r in rows
@@ -457,6 +468,7 @@ async def get_document_chunks(
 ):
     """Retrieve all chunks belonging to a document."""
     from db.pool import connection
+
     if connection is None:
         raise HTTPException(status_code=503, detail="Database pool unavailable")
 
@@ -482,7 +494,9 @@ async def get_document_chunks(
             "content": r["content"],
             "chunk_index": r["chunk_index"],
             "token_count": r["token_count"],
-            "metadata": r["metadata"] if isinstance(r["metadata"], dict) else json.loads(r["metadata"] or "{}"),
+            "metadata": r["metadata"]
+            if isinstance(r["metadata"], dict)
+            else json.loads(r["metadata"] or "{}"),
             "filename": r["filename"],
             "source_type": r["source_type"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -495,6 +509,7 @@ async def get_document_chunks(
 async def get_chunk(chunk_id: UUID, _scope=Depends(require_scope("query"))):
     """Retrieve chunk details, content, and parent document metadata."""
     from db.pool import connection
+
     if connection is None:
         raise HTTPException(status_code=503, detail="Database pool unavailable")
 
@@ -519,7 +534,9 @@ async def get_chunk(chunk_id: UUID, _scope=Depends(require_scope("query"))):
         "content": row["content"],
         "chunk_index": row["chunk_index"],
         "token_count": row["token_count"],
-        "metadata": row["metadata"] if isinstance(row["metadata"], dict) else json.loads(row["metadata"] or "{}"),
+        "metadata": row["metadata"]
+        if isinstance(row["metadata"], dict)
+        else json.loads(row["metadata"] or "{}"),
         "filename": row["filename"],
         "source_type": row["source_type"],
         "pipeline_id": str(row["pipeline_id"]) if row["pipeline_id"] else None,

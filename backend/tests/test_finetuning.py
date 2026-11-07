@@ -3,28 +3,25 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-
 from main import app
+from worker.tasks import poll_finetune_job
+
 from pipelines.finetuning.extractor import (
-    CITATION_PATTERN,
     TrainingDataExtractor,
     contains_pii,
-    extract_context_from_prompt,
     has_valid_citation,
 )
 from pipelines.finetuning.job_manager import (
-    OPENAI_MINIMUM_EXAMPLES,
     FinetuneJobManager,
 )
 from pipelines.finetuning.tracker import MLflowTracker
-from worker.tasks import poll_finetune_job
 
 
 @pytest.fixture
@@ -35,6 +32,7 @@ def client():
 # -------------------------------------------------------------------------
 # Helper Mock DB Context
 # -------------------------------------------------------------------------
+
 
 def _create_mock_db_context(mock_conn):
     mock_ctx = MagicMock()
@@ -63,6 +61,7 @@ def _create_mock_db_context(mock_conn):
 # 1. PII Detection Tests
 # -------------------------------------------------------------------------
 
+
 def test_contains_pii_emails():
     """Verify email addresses are flagged accurately without leaking."""
     assert contains_pii("Contact me at user@example.com for details.") is True
@@ -86,6 +85,7 @@ def test_contains_pii_phone_numbers():
 # 2. Citation Validation Tests
 # -------------------------------------------------------------------------
 
+
 def test_citation_pattern_validation():
     """Verify strict [Source N] positive integer citation checking."""
     assert has_valid_citation("The court ruled in favor of plaintiff [Source 1].") is True
@@ -101,6 +101,7 @@ def test_citation_pattern_validation():
 # -------------------------------------------------------------------------
 # 3. Token Length Boundary Tests
 # -------------------------------------------------------------------------
+
 
 def test_token_length_filtering():
     """Verify assistant responses are rejected if < 50 tokens or > 2000 tokens."""
@@ -121,13 +122,16 @@ def test_token_length_filtering():
     assert 50 <= tokens <= 2000
 
     # 3. Too long (> 2000 tokens)
-    long_text = ("This is repeated legal text verifying upper bound constraints. " * 300) + "[Source 1]"
+    long_text = (
+        "This is repeated legal text verifying upper bound constraints. " * 300
+    ) + "[Source 1]"
     assert extractor.token_counter.count(long_text) > 2000
 
 
 # -------------------------------------------------------------------------
 # 4. Quality Score and User Rating Filtering
 # -------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_quality_score_and_user_rating_filtering():
@@ -151,7 +155,7 @@ async def test_quality_score_and_user_rating_filtering():
             "quality_score": 0.88,
             "eval_faithfulness": 0.95,
             "user_rating": 5,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         },
         # Candidate 2: Rejected rating (user_rating = 2)
         {
@@ -162,7 +166,7 @@ async def test_quality_score_and_user_rating_filtering():
             "quality_score": 0.85,
             "eval_faithfulness": 0.90,
             "user_rating": 2,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         },
         # Candidate 3: Missing citation
         {
@@ -173,13 +177,17 @@ async def test_quality_score_and_user_rating_filtering():
             "quality_score": 0.86,
             "eval_faithfulness": 0.92,
             "user_rating": 4,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         },
     ]
 
     accepted, rejection_reasons = await extractor.validate_and_filter_pairs(candidates)
     assert len(accepted) == 1
-    assert accepted[0]["quality_score"] == 0.88 if isinstance(accepted[0], dict) else accepted[0].quality_score == 0.88
+    assert (
+        accepted[0]["quality_score"] == 0.88
+        if isinstance(accepted[0], dict)
+        else accepted[0].quality_score == 0.88
+    )
     assert rejection_reasons["rejected_rating"] == 1
     assert rejection_reasons["missing_citation"] == 1
 
@@ -187,6 +195,7 @@ async def test_quality_score_and_user_rating_filtering():
 # -------------------------------------------------------------------------
 # 5. Missing Faithfulness Re-Evaluation Tests
 # -------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_missing_faithfulness_reevaluation_rejection():
@@ -219,7 +228,7 @@ async def test_missing_faithfulness_reevaluation_rejection():
             "quality_score": 0.89,
             "eval_faithfulness": None,  # Missing!
             "user_rating": None,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
             "run_prompt": "<context>PostgreSQL details</context>",
         }
     ]
@@ -260,7 +269,7 @@ async def test_missing_faithfulness_reevaluation_acceptance():
             "quality_score": 0.89,
             "eval_faithfulness": None,
             "user_rating": 4,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
             "run_prompt": "<context>PostgreSQL details</context>",
         }
     ]
@@ -274,6 +283,7 @@ async def test_missing_faithfulness_reevaluation_acceptance():
 # -------------------------------------------------------------------------
 # 6. JSONL Formatting and Persistence Tests
 # -------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_jsonl_formatting_and_persistence(tmp_path):
@@ -297,7 +307,7 @@ async def test_jsonl_formatting_and_persistence(tmp_path):
         "quality_score": 0.88,
         "eval_faithfulness": 0.94,
         "user_rating": 5,
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
         "run_prompt": "<context>Liability is limited to fees paid.</context>",
     }
 
@@ -331,6 +341,7 @@ async def test_jsonl_formatting_and_persistence(tmp_path):
 # -------------------------------------------------------------------------
 # 7. MLflow Tracker Parameter, Artifact & Metric Logging Tests
 # -------------------------------------------------------------------------
+
 
 def test_mlflow_tracker_run_creation_and_logging(tmp_path):
     """Verify MLflowTracker creates run with finetune-{id}, logs parameters and artifact."""
@@ -389,22 +400,25 @@ def test_mlflow_tracker_run_creation_and_logging(tmp_path):
 # 8. Insufficient Training Examples Rejection
 # -------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_job_manager_rejects_insufficient_samples():
     """Verify JobManager fails cleanly when valid examples < 10 (OpenAI minimum)."""
     mock_extractor = MagicMock()
-    mock_extractor.extract_for_job = AsyncMock(return_value=(
-        Path("/fake/file.jsonl"),
-        {
-            "eligible_count": 5,
-            "accepted_count": 5,
-            "rejected_count": 0,
-            "rejection_reasons": {},
-            "average_quality_score": 0.88,
-            "date_range": "2026-10-20",
-        },
-        [MagicMock() for _ in range(5)],
-    ))
+    mock_extractor.extract_for_job = AsyncMock(
+        return_value=(
+            Path("/fake/file.jsonl"),
+            {
+                "eligible_count": 5,
+                "accepted_count": 5,
+                "rejected_count": 0,
+                "rejection_reasons": {},
+                "average_quality_score": 0.88,
+                "date_range": "2026-10-20",
+            },
+            [MagicMock() for _ in range(5)],
+        )
+    )
 
     mock_conn = AsyncMock()
     mock_mgr = _create_mock_db_context(mock_conn)
@@ -424,6 +438,7 @@ async def test_job_manager_rejects_insufficient_samples():
 # -------------------------------------------------------------------------
 # 9. Provider Submission and Polling Tests
 # -------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_poll_finetune_job_success_and_model_registration():
@@ -456,8 +471,10 @@ async def test_poll_finetune_job_success_and_model_registration():
 
     mock_ctx = {"redis": mock_redis}
 
-    with patch("worker.tasks.connection", mock_mgr), \
-         patch("worker.tasks.MLflowTracker") as mock_tracker_cls:
+    with (
+        patch("worker.tasks.connection", mock_mgr),
+        patch("worker.tasks.MLflowTracker") as mock_tracker_cls,
+    ):
         mock_tracker = MagicMock()
         mock_tracker_cls.return_value = mock_tracker
 
@@ -472,7 +489,9 @@ async def test_poll_finetune_job_success_and_model_registration():
 
         # Verify DB updated to succeeded
         update_calls = [c[0][0] for c in mock_conn.execute.call_args_list]
-        assert any("UPDATE finetune_jobs" in str(sql) and "succeeded" in str(sql) for sql in update_calls)
+        assert any(
+            "UPDATE finetune_jobs" in str(sql) and "succeeded" in str(sql) for sql in update_calls
+        )
 
         # Verify Redis model registered
         assert mock_redis.hset.called
@@ -510,6 +529,7 @@ async def test_poll_finetune_job_idempotency_terminal_state():
 # 10. DPO Preference Extraction Tests
 # -------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_dpo_preference_pairing_and_deduplication():
     """Verify DPO matches chosen (>= 4) and rejected (<= 2) for identical queries and ignores PII."""
@@ -524,7 +544,11 @@ async def test_dpo_preference_pairing_and_deduplication():
         {"query": "What is the liability cap?", "generation": good_response, "rating": 5},
         {"query": "What is the liability cap?", "generation": bad_response, "rating": 2},
         # Query 2: Only positive, no negative (should be skipped)
-        {"query": "What is the notice period?", "generation": "Notice period is 30 days [Source 1].", "rating": 5},
+        {
+            "query": "What is the notice period?",
+            "generation": "Notice period is 30 days [Source 1].",
+            "rating": 5,
+        },
         # Query 3: PII query (should be skipped)
         {"query": "Contact user@example.com for NDA?", "generation": good_response, "rating": 5},
         {"query": "Contact user@example.com for NDA?", "generation": bad_response, "rating": 1},
@@ -541,23 +565,29 @@ async def test_dpo_preference_pairing_and_deduplication():
 # 11. API Endpoints Tests
 # -------------------------------------------------------------------------
 
+
 def test_api_preview_training_data(client):
     """GET /finetune/training-data/preview returns preview without modifying state."""
     mock_extractor = MagicMock()
-    mock_extractor.preview_eligible_pairs = AsyncMock(return_value=([
-        {
-            "id": str(uuid4()),
-            "run_id": str(uuid4()),
-            "user_message": "What is pgvector?",
-            "assistant_message": "pgvector is a vector similarity search extension for PostgreSQL [Source 1].",
-            "quality_score": 0.92,
-            "faithfulness": 0.95,
-            "user_rating": 5,
-            "token_count": 65,
-            "citations_count": 1,
-            "has_valid_citations": True,
-        }
-    ], 1))
+    mock_extractor.preview_eligible_pairs = AsyncMock(
+        return_value=(
+            [
+                {
+                    "id": str(uuid4()),
+                    "run_id": str(uuid4()),
+                    "user_message": "What is pgvector?",
+                    "assistant_message": "pgvector is a vector similarity search extension for PostgreSQL [Source 1].",
+                    "quality_score": 0.92,
+                    "faithfulness": 0.95,
+                    "user_rating": 5,
+                    "token_count": 65,
+                    "citations_count": 1,
+                    "has_valid_citations": True,
+                }
+            ],
+            1,
+        )
+    )
 
     with patch("api.finetune.TrainingDataExtractor", return_value=mock_extractor):
         response = client.get("/finetune/training-data/preview")
@@ -573,7 +603,7 @@ def test_api_list_and_get_job(client):
     """GET /finetune/jobs and GET /finetune/jobs/{id} return expected structures."""
     jid = uuid4()
     mock_conn = AsyncMock()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     job_record = {
         "id": jid,
         "provider_job_id": "ftjob-001",

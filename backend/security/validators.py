@@ -32,12 +32,25 @@ def validate_public_url(url: str, *, resolve: bool = True) -> list[str]:
         if port is not None and port != expected_port:
             raise ValueError("Unexpected URL port.")
         host = parsed.hostname.rstrip(".").lower()
-        if host == "localhost" or host.endswith(".localhost") or ("." not in host and not _is_ip(host)):
+        if (
+            host == "localhost"
+            or host.endswith(".localhost")
+            or ("." not in host and not _is_ip(host))
+        ):
             raise ValueError("Internal hostnames are not allowed.")
         if _is_ip(host):
             addresses = [str(ipaddress.ip_address(host))]
         elif resolve:
-            addresses = sorted({item[4][0] for item in socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)})
+            addresses = sorted(
+                {
+                    item[4][0]
+                    for item in socket.getaddrinfo(
+                        host,
+                        port or (443 if parsed.scheme == "https" else 80),
+                        type=socket.SOCK_STREAM,
+                    )
+                }
+            )
         else:
             addresses = []
         for address in addresses:
@@ -48,7 +61,9 @@ def validate_public_url(url: str, *, resolve: bool = True) -> list[str]:
                 raise ValueError("URL resolves to a non-public destination.")
         return addresses
     except (ValueError, OSError, socket.gaierror) as exc:
-        if isinstance(exc, ValueError) and str(exc).startswith(("Only", "Credentials", "Invalid", "Unexpected", "Internal", "URL resolves")):
+        if isinstance(exc, ValueError) and str(exc).startswith(
+            ("Only", "Credentials", "Invalid", "Unexpected", "Internal", "URL resolves")
+        ):
             raise
         raise ValueError("URL is invalid or does not resolve to a public destination.") from exc
 

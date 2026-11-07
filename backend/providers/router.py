@@ -1,4 +1,3 @@
-
 import json
 from dataclasses import dataclass
 
@@ -39,9 +38,18 @@ class ModelRouter:
             except Exception:
                 # Fallback in case raw_config had unquoted keys like {name:gpt-4o}
                 import re
-                fixed = re.sub(r'([{,])\s*([a-zA-Z0-9_]+)\s*:', r'\1"\2":', raw_config)
+
+                fixed = re.sub(r"([{,])\s*([a-zA-Z0-9_]+)\s*:", r'\1"\2":', raw_config)
                 # quote unquoted string values that aren't true/false/null/numbers
-                fixed = re.sub(r':\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*([,}])', lambda m: f':"{m.group(1)}"{m.group(2)}' if m.group(1) not in ('true', 'false', 'null') else m.group(0), fixed)
+                fixed = re.sub(
+                    r":\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*([,}])",
+                    lambda m: (
+                        f':"{m.group(1)}"{m.group(2)}'
+                        if m.group(1) not in ("true", "false", "null")
+                        else m.group(0)
+                    ),
+                    fixed,
+                )
                 try:
                     config = json.loads(fixed)
                 except Exception:
@@ -79,48 +87,30 @@ class ModelRouter:
             if criteria.require_vision and not model.get("vision", False):
                 continue
 
-            if (
-                criteria.require_long_context
-                and model.get("context_window", 0) <= 100000
-            ):
+            if criteria.require_long_context and model.get("context_window", 0) <= 100000:
                 continue
 
             if criteria.max_cost_per_call is not None:
                 estimated_cost = model.get("estimated_cost_per_call")
-                if (
-                    estimated_cost is None
-                    or estimated_cost > criteria.max_cost_per_call
-                ):
+                if estimated_cost is None or estimated_cost > criteria.max_cost_per_call:
                     continue
 
             if criteria.latency_budget_ms is not None:
                 estimated_latency = model.get("estimated_latency_ms")
-                if (
-                    estimated_latency is None
-                    or estimated_latency > criteria.latency_budget_ms
-                ):
+                if estimated_latency is None or estimated_latency > criteria.latency_budget_ms:
                     continue
 
             candidates.append(model)
 
         if not candidates:
-            raise ValueError(
-                "No registered model satisfies the routing criteria."
-            )
+            raise ValueError("No registered model satisfies the routing criteria.")
 
         if criteria.prefer_fine_tuned:
-            fine_tuned = [
-                model for model in candidates
-                if model.get("fine_tuned", False)
-            ]
+            fine_tuned = [model for model in candidates if model.get("fine_tuned", False)]
             if fine_tuned:
                 candidates = fine_tuned
 
         # Prefer the lowest estimated cost among eligible models.
-        candidates.sort(
-            key=lambda model: model.get(
-                "estimated_cost_per_call", float("inf")
-            )
-        )
+        candidates.sort(key=lambda model: model.get("estimated_cost_per_call", float("inf")))
 
         return candidates[0]["name"]

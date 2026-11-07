@@ -1,16 +1,18 @@
 """Keep legacy endpoint tests focused on their behavior under new auth defaults."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 
 @pytest.fixture(autouse=True)
 def authenticated_test_client(monkeypatch):
-    from main import app
-    from backend.security.auth import ClientProfile, get_current_user
+    import api.compare as compare_api
     import api.query as query_api
     import api.retrieve as retrieve_api
-    import api.compare as compare_api
+    from main import app
+
+    from backend.security.auth import ClientProfile, get_current_user
 
     async def test_user():
         return ClientProfile("test-suite", frozenset({"query", "ingest", "admin"}))

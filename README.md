@@ -29,6 +29,7 @@ docs/          Architecture, API contracts, data models, and ADRs
 - [REST API contracts](docs/api-contracts.md)
 - [Data models](docs/data-models.md)
 - [Operational observability](docs/observability.md)
+- [Cloud deployment and production verification](docs/deployment.md)
 - [ADR 001 — Vector store](docs/adr/001-vector-store.md)
 - [ADR 002 — Chunking strategy](docs/adr/002-chunking-strategy.md)
 - [ADR 003 — Evaluation framework](docs/adr/003-evaluation-framework.md)
@@ -36,7 +37,24 @@ docs/          Architecture, API contracts, data models, and ADRs
 
 ## Local development
 
-This is an architecture-first repository. No production services or credentials are required to read the design. Before running future implementation tasks, copy `.env.example` to `.env` if one is added, use local development credentials, and never commit secrets.
+This repository includes an implemented backend and deployment documentation. For local setup, copy `.env.example` to `.env`, use local development credentials, and never commit secrets.
+
+## Deployment
+
+### Production Deployment
+
+Deployment target: Railway. **Live API URL: Not deployed. MLflow URL: Not
+deployed. Frontend URL: Not deployed.** Add the live URLs here after they exist
+and pass health checks; no production endpoint is configured in this repo.
+
+Architecture: Railway-hosted PostgreSQL 16 with pgvector and Redis 7; separate
+MLflow tracking, FastAPI, ARQ worker, and static Next.js/Nginx frontend services.
+The API and worker share the database, Redis, provider credentials, and MLflow
+tracking URI. The frontend calls the public API URL baked in at build time.
+
+Follow [docs/deployment.md](docs/deployment.md) for prerequisites, service
+configuration, environment variables, deployment commands, production
+verification, load testing, rollback, and the preview deployment limitation.
 
 ## Security and operational principles
 

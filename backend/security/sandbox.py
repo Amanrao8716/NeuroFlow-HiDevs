@@ -6,8 +6,8 @@ import json
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from pipelines.ingestion.models import ExtractedPage
 
@@ -39,17 +39,34 @@ class DockerExtractionSandbox:
             input_path.write_bytes(data)
             os.chmod(input_path, 0o444)
             command = [
-                "docker", "run", "--rm", "--network=none", "--memory=256m",
-                "--cpus=1", "--pids-limit=64", "--read-only", "--cap-drop=ALL",
-                "--security-opt=no-new-privileges", "--user=65534:65534",
-                "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
-                "--mount", f"type=bind,source={input_dir},target=/input,readonly",
-                "--mount", f"type=bind,source={output_dir},target=/output",
-                self.image, "python", "-m", "worker.extract_document",
-                "--source-type", source_type,
+                "docker",
+                "run",
+                "--rm",
+                "--network=none",
+                "--memory=256m",
+                "--cpus=1",
+                "--pids-limit=64",
+                "--read-only",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--user=65534:65534",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=16m",
+                "--mount",
+                f"type=bind,source={input_dir},target=/input,readonly",
+                "--mount",
+                f"type=bind,source={output_dir},target=/output",
+                self.image,
+                "python",
+                "-m",
+                "worker.extract_document",
+                "--source-type",
+                source_type,
             ]
             try:
-                self.runner(command, check=True, capture_output=True, timeout=SANDBOX_TIMEOUT_SECONDS)
+                self.runner(
+                    command, check=True, capture_output=True, timeout=SANDBOX_TIMEOUT_SECONDS
+                )
                 if not output_path.is_file() or output_path.stat().st_size > MAX_OUTPUT_BYTES:
                     raise ValueError("Document extraction produced invalid or oversized output.")
                 payload = json.loads(output_path.read_text(encoding="utf-8"))

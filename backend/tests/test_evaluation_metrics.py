@@ -1,13 +1,14 @@
 """Unit tests for Task 7 RAGAS evaluation metrics."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from evaluation.metrics.faithfulness import FaithfulnessMetric, FaithfulnessScore
+import pytest
+from providers.base import GenerationResult
+
 from evaluation.metrics.answer_relevance import AnswerRelevanceMetric, AnswerRelevanceScore
 from evaluation.metrics.context_precision import ContextPrecisionMetric, ContextPrecisionScore
 from evaluation.metrics.context_recall import ContextRecallMetric, ContextRecallScore
-from providers.base import GenerationResult
+from evaluation.metrics.faithfulness import FaithfulnessMetric, FaithfulnessScore
 
 
 @pytest.fixture
@@ -18,6 +19,7 @@ def mock_llm():
 
 
 # --- Faithfulness Tests ---
+
 
 @pytest.mark.asyncio
 async def test_faithfulness_metric_success(mock_llm):
@@ -94,6 +96,7 @@ async def test_faithfulness_no_client():
 
 # --- Answer Relevance Tests ---
 
+
 @pytest.mark.asyncio
 async def test_answer_relevance_metric_success(mock_llm):
     mock_llm.chat.return_value = GenerationResult(
@@ -126,6 +129,7 @@ async def test_answer_relevance_no_client():
 
 
 # --- Context Precision Tests ---
+
 
 @pytest.mark.asyncio
 async def test_context_precision_empty_context():
@@ -160,6 +164,7 @@ async def test_context_precision_success(mock_llm):
 
 
 # --- Context Recall Tests ---
+
 
 @pytest.mark.asyncio
 async def test_context_recall_empty_context():

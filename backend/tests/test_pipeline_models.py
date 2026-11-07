@@ -11,10 +11,8 @@ from backend.models.pipeline import (
     IngestionConfig,
     PipelineConfig,
     PipelineCreateRequest,
-    PipelineUpdateRequest,
     RerankerType,
     RetrievalConfig,
-    SystemPromptVariant,
 )
 from backend.services.pipeline_optimizer import PipelineOptimizer
 
@@ -148,42 +146,51 @@ def test_rejects_unknown_fields_nested_levels():
     """Extra fields at nested configuration levels must be strictly forbidden."""
     # Unknown in ingestion
     with pytest.raises(ValidationError) as exc:
-        IngestionConfig.model_validate({
-            "chunking_strategy": "auto",
-            "chunk_size_tokens": 512,
-            "chunk_overlap_tokens": 50,
-            "unsupported_nested_field": "error",
-        })
+        IngestionConfig.model_validate(
+            {
+                "chunking_strategy": "auto",
+                "chunk_size_tokens": 512,
+                "chunk_overlap_tokens": 50,
+                "unsupported_nested_field": "error",
+            }
+        )
     assert "Extra inputs are not permitted" in str(exc.value)
 
     # Unknown in retrieval
     with pytest.raises(ValidationError) as exc:
-        RetrievalConfig.model_validate({
-            "dense_k": 10,
-            "unknown_retrieval_option": True,
-        })
+        RetrievalConfig.model_validate(
+            {
+                "dense_k": 10,
+                "unknown_retrieval_option": True,
+            }
+        )
     assert "Extra inputs are not permitted" in str(exc.value)
 
     # Unknown in generation
     with pytest.raises(ValidationError) as exc:
-        GenerationConfig.model_validate({
-            "temperature": 0.5,
-            "bogus_setting": "nope",
-        })
+        GenerationConfig.model_validate(
+            {
+                "temperature": 0.5,
+                "bogus_setting": "nope",
+            }
+        )
     assert "Extra inputs are not permitted" in str(exc.value)
 
     # Unknown in evaluation
     with pytest.raises(ValidationError) as exc:
-        EvaluationConfig.model_validate({
-            "auto_evaluate": True,
-            "hallucination_meter": 99,
-        })
+        EvaluationConfig.model_validate(
+            {
+                "auto_evaluate": True,
+                "hallucination_meter": 99,
+            }
+        )
     assert "Extra inputs are not permitted" in str(exc.value)
 
 
 # -------------------------------------------------------------------------
 # Optimizer Tests
 # -------------------------------------------------------------------------
+
 
 def test_optimizer_insufficient_data():
     """When fewer than min_sample_count evaluations exist, no recommendations are made."""
@@ -199,7 +206,12 @@ def test_optimizer_insufficient_data():
 
     # Only 3 evaluations (below minimum of 5)
     recent_evals = [
-        {"context_precision": 0.2, "context_recall": 0.2, "answer_relevance": 0.2, "faithfulness": 0.2}
+        {
+            "context_precision": 0.2,
+            "context_recall": 0.2,
+            "answer_relevance": 0.2,
+            "faithfulness": 0.2,
+        }
         for _ in range(3)
     ]
     suggestions = optimizer.analyze(config, recent_evals)
@@ -218,7 +230,12 @@ def test_optimizer_healthy_pipeline_no_suggestions():
         evaluation=EvaluationConfig(),
     )
     recent_evals = [
-        {"context_precision": 0.90, "context_recall": 0.88, "answer_relevance": 0.92, "faithfulness": 0.95}
+        {
+            "context_precision": 0.90,
+            "context_recall": 0.88,
+            "answer_relevance": 0.92,
+            "faithfulness": 0.95,
+        }
         for _ in range(6)
     ]
     suggestions = optimizer.analyze(config, recent_evals)
@@ -238,7 +255,12 @@ def test_optimizer_low_context_precision_rule():
     )
     # Average precision = 0.40 (< 0.60)
     recent_evals = [
-        {"context_precision": 0.40, "context_recall": 0.85, "answer_relevance": 0.85, "faithfulness": 0.85}
+        {
+            "context_precision": 0.40,
+            "context_recall": 0.85,
+            "answer_relevance": 0.85,
+            "faithfulness": 0.85,
+        }
         for _ in range(5)
     ]
     suggestions = optimizer.analyze(config, recent_evals)
@@ -261,7 +283,12 @@ def test_optimizer_low_context_recall_rule():
         evaluation=EvaluationConfig(),
     )
     recent_evals = [
-        {"context_precision": 0.85, "context_recall": 0.45, "answer_relevance": 0.85, "faithfulness": 0.85}
+        {
+            "context_precision": 0.85,
+            "context_recall": 0.45,
+            "answer_relevance": 0.85,
+            "faithfulness": 0.85,
+        }
         for _ in range(5)
     ]
     suggestions = optimizer.analyze(config, recent_evals)
@@ -284,7 +311,12 @@ def test_optimizer_low_answer_relevance_rule():
         evaluation=EvaluationConfig(),
     )
     recent_evals = [
-        {"context_precision": 0.85, "context_recall": 0.85, "answer_relevance": 0.50, "faithfulness": 0.85}
+        {
+            "context_precision": 0.85,
+            "context_recall": 0.85,
+            "answer_relevance": 0.50,
+            "faithfulness": 0.85,
+        }
         for _ in range(5)
     ]
     suggestions = optimizer.analyze(config, recent_evals)
@@ -305,13 +337,22 @@ def test_optimizer_low_faithfulness_rule():
         evaluation=EvaluationConfig(),
     )
     recent_evals = [
-        {"context_precision": 0.85, "context_recall": 0.85, "answer_relevance": 0.85, "faithfulness": 0.55}
+        {
+            "context_precision": 0.85,
+            "context_recall": 0.85,
+            "answer_relevance": 0.85,
+            "faithfulness": 0.55,
+        }
         for _ in range(5)
     ]
     suggestions = optimizer.analyze(config, recent_evals)
     rule_ids = [s.rule_id for s in suggestions]
     # Rule id from pipeline_optimizer.py is "reduce_temperature_and_tighten_grounding"
     assert any("faithfulness" in r or "temperature" in r or "grounding" in r for r in rule_ids)
-    sug = next(s for s in suggestions if "temperature" in s.rule_id or "faithfulness" in s.rule_id or "grounding" in s.rule_id)
+    sug = next(
+        s
+        for s in suggestions
+        if "temperature" in s.rule_id or "faithfulness" in s.rule_id or "grounding" in s.rule_id
+    )
     # Temperature should be reduced (lowered) in proposed change
     assert sug.proposed_change["generation"]["temperature"] <= 0.5

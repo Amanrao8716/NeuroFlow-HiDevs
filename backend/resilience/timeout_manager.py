@@ -66,15 +66,15 @@ TIMEOUT_DEFAULTS: dict[str, float] = {
 # Adaptive timeout parameters
 MAX_OBSERVATIONS = 1_000
 MIN_OBSERVATIONS = 30
-P95_MULTIPLIER = 1.5        # adaptive = p95 × 1.5
-MIN_RATIO = 0.5             # lower-bound: static × 0.5
-MAX_RATIO = 4.0             # upper-bound: static × 4.0
+P95_MULTIPLIER = 1.5  # adaptive = p95 × 1.5
+MIN_RATIO = 0.5  # lower-bound: static × 0.5
+MAX_RATIO = 4.0  # upper-bound: static × 4.0
 
 # Trend detection parameters
-TREND_WINDOW_S = 300        # seconds – recent window size
-TREND_RATIO = 1.25          # flag if recent_median ≥ 1.25 × prior_median
-TREND_MIN_OBS = 5           # minimum observations per window
-WARN_COOLDOWN_S = 60        # min seconds between warnings per task type
+TREND_WINDOW_S = 300  # seconds – recent window size
+TREND_RATIO = 1.25  # flag if recent_median ≥ 1.25 × prior_median
+TREND_MIN_OBS = 5  # minimum observations per window
+WARN_COOLDOWN_S = 60  # min seconds between warnings per task type
 
 
 class TaskTimeout(asyncio.TimeoutError):
@@ -83,9 +83,7 @@ class TaskTimeout(asyncio.TimeoutError):
     def __init__(self, task_type: str, timeout_s: float) -> None:
         self.task_type = task_type
         self.timeout_s = timeout_s
-        super().__init__(
-            f"Task '{task_type}' timed out after {timeout_s:.1f}s."
-        )
+        super().__init__(f"Task '{task_type}' timed out after {timeout_s:.1f}s.")
 
 
 class TimeoutManager:
@@ -138,12 +136,14 @@ class TimeoutManager:
         extra_timeout:
             Override the computed timeout for this single call.
         """
-        timeout_s = extra_timeout if extra_timeout is not None else await self._get_timeout(task_type)
+        timeout_s = (
+            extra_timeout if extra_timeout is not None else await self._get_timeout(task_type)
+        )
 
         start = time.perf_counter()
         try:
             result = await asyncio.wait_for(asyncio.ensure_future(coro), timeout=timeout_s)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             elapsed = time.perf_counter() - start
             logger.warning(
                 "timeout task_type=%s timeout_s=%.1f elapsed_s=%.1f",

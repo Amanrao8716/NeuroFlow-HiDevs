@@ -8,10 +8,10 @@ Provides production-quality fault-tolerance primitives:
 - TimeoutManager   – bounded async operations with adaptive p95 timeouts
 """
 
+from .backpressure import BackpressureGuard, QueueStatus
 from .circuit_breaker import CircuitBreaker, CircuitOpenError, CircuitState
 from .rate_limiter import RateLimiter, RateLimitExceeded
-from .backpressure import BackpressureGuard, QueueStatus
-from .timeout_manager import TimeoutManager, TaskTimeout, TIMEOUT_DEFAULTS
+from .timeout_manager import TIMEOUT_DEFAULTS, TaskTimeout, TimeoutManager
 
 __all__ = [
     "CircuitBreaker",

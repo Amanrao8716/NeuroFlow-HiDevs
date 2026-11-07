@@ -1,8 +1,8 @@
-
 import asyncio
 import time
 from threading import Lock
 
+from observability.metrics import PROVIDER_CALLS, PROVIDER_COST, PROVIDER_TOKENS
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
@@ -10,7 +10,6 @@ from .anthropic_provider import AnthropicProvider
 from .base import ChatMessage, GenerationResult
 from .openai_provider import OpenAIProvider
 from .router import ModelRouter, RoutingCriteria
-from observability.metrics import PROVIDER_CALLS, PROVIDER_COST, PROVIDER_TOKENS
 
 _LOCAL_EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _model_instance = None
@@ -36,7 +35,6 @@ def _encode_texts(texts: list[str]) -> list[list[float]]:
     return embeddings.tolist()
 
 
-
 class NeuroFlowClient:
     """Main client for routed LLM calls, embeddings, and metrics."""
 
@@ -46,12 +44,8 @@ class NeuroFlowClient:
         self.providers = {
             "gpt-4o": OpenAIProvider(model="gpt-4o"),
             "gpt-4o-mini": OpenAIProvider(model="gpt-4o-mini"),
-            "claude-sonnet-4-20250514": AnthropicProvider(
-                model="claude-sonnet-4-20250514"
-            ),
-            "claude-3-5-haiku-latest": AnthropicProvider(
-                model="claude-3-5-haiku-latest"
-            ),
+            "claude-sonnet-4-20250514": AnthropicProvider(model="claude-sonnet-4-20250514"),
+            "claude-3-5-haiku-latest": AnthropicProvider(model="claude-3-5-haiku-latest"),
         }
         self.router = ModelRouter(redis_client, self.providers)
         self.tracer = trace.get_tracer("neuroflow.providers")
@@ -98,12 +92,8 @@ class NeuroFlowClient:
             operation="chat",
             status="success",
         ).inc()
-        PROVIDER_TOKENS.labels(provider=provider_name, direction="input").inc(
-            result.input_tokens
-        )
-        PROVIDER_TOKENS.labels(provider=provider_name, direction="output").inc(
-            result.output_tokens
-        )
+        PROVIDER_TOKENS.labels(provider=provider_name, direction="input").inc(result.input_tokens)
+        PROVIDER_TOKENS.labels(provider=provider_name, direction="output").inc(result.output_tokens)
         PROVIDER_COST.labels(provider=provider_name).inc(result.cost_usd)
         await self._record_metrics(model_name, result)
         return result

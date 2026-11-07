@@ -1,6 +1,7 @@
 """Tests for citation extraction, validation, and invalid reference handling."""
 
 import pytest
+
 from pipelines.generation.citations import CitationTracker
 from pipelines.generation.prompt_builder import SourceMapEntry
 
@@ -87,4 +88,11 @@ def test_citation_tracker_invalid_and_out_of_bounds(sample_source_map):
 def test_citation_tracker_empty_or_no_citations(sample_source_map):
     tracker = CitationTracker()
     assert len(tracker.extract_and_validate("", sample_source_map).all_citations) == 0
-    assert len(tracker.extract_and_validate("Just text with no citations", sample_source_map).all_citations) == 0
+    assert (
+        len(
+            tracker.extract_and_validate(
+                "Just text with no citations", sample_source_map
+            ).all_citations
+        )
+        == 0
+    )

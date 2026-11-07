@@ -18,13 +18,14 @@ clock – NO real Redis, PostgreSQL, or paid LLM API calls are used.
 from __future__ import annotations
 
 import asyncio
-import math
 import time
+
 import pytest
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers – lightweight in-memory fake Redis
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class FakeRedis:
     """
@@ -36,7 +37,7 @@ class FakeRedis:
 
     def __init__(self):
         self._store: dict = {}
-        self._scripts: dict[str, str] = {}   # sha -> lua source (not executed natively)
+        self._scripts: dict[str, str] = {}  # sha -> lua source (not executed natively)
         # Pre-registered scripts by their approximate functionality
         self._lua_registry: dict[str, str] = {}
 
@@ -100,7 +101,7 @@ class FakeRedis:
         if end == -1:
             sliced = sorted_items[start:]
         else:
-            sliced = sorted_items[start:end + 1]
+            sliced = sorted_items[start : end + 1]
         return [item[0] for item in sliced]
 
     async def zremrangebyrank(self, key: str, start: int, end: int) -> int:
@@ -108,15 +109,15 @@ class FakeRedis:
         sorted_items = sorted(d.items(), key=lambda x: x[1])
         if end < 0:
             end = len(sorted_items) + end
-        to_remove = sorted_items[max(0, start):end + 1]
+        to_remove = sorted_items[max(0, start) : end + 1]
         for member, _ in to_remove:
             del d[member]
         return len(to_remove)
 
     async def zremrangebyscore(self, key: str, min_score, max_score) -> int:
         d = self._store.get(key, {})
-        min_v = float('-inf') if min_score == '-inf' else float(min_score)
-        max_v = float('inf') if max_score == '+inf' else float(max_score)
+        min_v = float("-inf") if min_score == "-inf" else float(min_score)
+        max_v = float("inf") if max_score == "+inf" else float(max_score)
         to_remove = [m for m, s in d.items() if min_v <= s <= max_v]
         for m in to_remove:
             del d[m]
@@ -196,7 +197,14 @@ class FakeRedis:
             return await self._sim_record_success(keys, argv)
         elif "ZREMRANGEBYSCORE" in script and "ZCARD" in script:
             return await self._sim_slide_window(keys, argv)
-        elif "inflight >= max_calls" in script or "inflight_key" in script and "INCR" in script and "state_key" in keys[0] if keys else False:
+        elif (
+            "inflight >= max_calls" in script
+            or "inflight_key" in script
+            and "INCR" in script
+            and "state_key" in keys[0]
+            if keys
+            else False
+        ):
             return await self._sim_acquire_half_open(keys, argv)
         elif "DECR" in script and "inflight_key" in script and "required" not in script:
             return await self._sim_release_slot(keys, argv)
@@ -342,8 +350,9 @@ class FakeRedis:
 # Circuit Breaker Tests
 # ──────────────────────────────────────────────────────────────────────────────
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from resilience.circuit_breaker import CircuitBreaker, CircuitOpenError, CircuitState
@@ -532,7 +541,7 @@ class TestCircuitBreaker:
 # Rate Limiter Tests
 # ──────────────────────────────────────────────────────────────────────────────
 
-from resilience.rate_limiter import RateLimiter, RateLimitExceeded, BucketConfig
+from resilience.rate_limiter import BucketConfig, RateLimiter, RateLimitExceeded
 
 
 class FakeClock:
@@ -547,7 +556,6 @@ class FakeClock:
 
 
 class TestRateLimiter:
-
     def _make_rl(self, capacity=10.0, refill_rate=1.0, max_wait=5.0):
         clock = FakeClock()
         redis = FakeRedis()
@@ -628,7 +636,7 @@ class TestRateLimiter:
 # Sliding-Window Endpoint Rate Limiter Tests
 # ──────────────────────────────────────────────────────────────────────────────
 
-from resilience.endpoint_rate_limiter import SlidingWindowRateLimiter, RouteLimit, ROUTE_LIMITS
+from resilience.endpoint_rate_limiter import RouteLimit, SlidingWindowRateLimiter
 
 
 class FakeRequest:
@@ -641,7 +649,6 @@ class FakeRequest:
 
 
 class TestEndpointRateLimiter:
-
     def _make_limiter(self, limit=3, window_s=60):
         redis = FakeRedis()
         limits = {
@@ -701,11 +708,10 @@ class TestEndpointRateLimiter:
 # Backpressure Tests
 # ──────────────────────────────────────────────────────────────────────────────
 
-from resilience.backpressure import BackpressureGuard, QueueStatus, INGEST_QUEUE_KEY
+from resilience.backpressure import INGEST_QUEUE_KEY, BackpressureGuard, QueueStatus
 
 
 class TestBackpressure:
-
     def _make_guard(self, depth: int):
         redis = FakeRedis()
         redis._store[INGEST_QUEUE_KEY] = str(depth)
@@ -751,6 +757,7 @@ class TestBackpressure:
     @pytest.mark.asyncio
     async def test_redis_failure_defaults_to_zero_depth(self):
         """If Redis is unreachable, depth defaults to 0 (fail-open for ingestion)."""
+
         class BrokenRedis:
             async def llen(self, key):
                 raise ConnectionError("Redis down")
@@ -765,13 +772,17 @@ class TestBackpressure:
 # ──────────────────────────────────────────────────────────────────────────────
 
 from resilience.timeout_manager import (
-    TimeoutManager, TaskTimeout, TIMEOUT_DEFAULTS,
-    MIN_OBSERVATIONS, P95_MULTIPLIER, MAX_RATIO, MIN_RATIO,
+    MAX_RATIO,
+    MIN_OBSERVATIONS,
+    MIN_RATIO,
+    P95_MULTIPLIER,
+    TIMEOUT_DEFAULTS,
+    TaskTimeout,
+    TimeoutManager,
 )
 
 
 class TestTimeoutManager:
-
     @pytest.mark.asyncio
     async def test_completes_within_timeout(self):
         redis = FakeRedis()
@@ -815,16 +826,31 @@ class TestTimeoutManager:
     @pytest.mark.asyncio
     async def test_timeout_counter_survives_redis_failure(self):
         """Metric failure must not prevent timeout from being raised."""
+
         class BrokenRedis:
             async def incr(self, key):
                 raise ConnectionError("Redis down")
-            async def script_load(self, s): return "sha"
-            async def evalsha(self, *a): return None
-            async def zadd(self, *a, **kw): raise ConnectionError()
-            async def zremrangebyrank(self, *a): raise ConnectionError()
-            def pipeline(self, **kw): raise ConnectionError()
-            async def zrange(self, *a, **kw): return []
-            async def get(self, key): return None
+
+            async def script_load(self, s):
+                return "sha"
+
+            async def evalsha(self, *a):
+                return None
+
+            async def zadd(self, *a, **kw):
+                raise ConnectionError()
+
+            async def zremrangebyrank(self, *a):
+                raise ConnectionError()
+
+            def pipeline(self, **kw):
+                raise ConnectionError()
+
+            async def zrange(self, *a, **kw):
+                return []
+
+            async def get(self, key):
+                return None
 
         tm = TimeoutManager(BrokenRedis())
 
@@ -874,6 +900,7 @@ class TestTimeoutManager:
     async def test_upward_trend_warning_emitted(self, caplog):
         """If recent latency is >= 1.25x prior median, a warning is emitted."""
         import logging
+
         redis = FakeRedis()
         tm = TimeoutManager(redis)
 
@@ -900,6 +927,7 @@ class TestTimeoutManager:
     async def test_upward_trend_warning_rate_limited(self, caplog):
         """Second trend check within cooldown period should NOT emit a warning."""
         import logging
+
         redis = FakeRedis()
         tm = TimeoutManager(redis)
 
@@ -925,8 +953,6 @@ class TestTimeoutManager:
 # Health endpoint integration tests (mocked)
 # ──────────────────────────────────────────────────────────────────────────────
 
-from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock, patch, MagicMock
 
 
 class TestHealthEndpoint:
@@ -941,7 +967,8 @@ class TestHealthEndpoint:
         redis._store["circuit:openai:failure_count"] = "5"
         redis._store["circuit:openai:opened_at"] = str(time.time())
 
-        from resilience.circuit_breaker import CircuitBreakerRegistry, CircuitBreaker
+        from resilience.circuit_breaker import CircuitBreakerRegistry
+
         registry = CircuitBreakerRegistry(redis)
         # Register the openai breaker
         registry.get("openai")
@@ -958,6 +985,7 @@ class TestHealthEndpoint:
         redis._store["circuit:anthropic:opened_at"] = str(opened_at)
 
         from resilience.circuit_breaker import CircuitBreaker
+
         cb = CircuitBreaker(redis, "anthropic")
         info = await cb.get_info()
         assert info["name"] == "anthropic"

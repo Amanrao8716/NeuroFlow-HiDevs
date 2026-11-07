@@ -2,9 +2,10 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
 import pytest
 
-from pipelines.retrieval.query_processor import ProcessedQuery, QueryProcessor
+from pipelines.retrieval.query_processor import QueryProcessor
 
 
 @pytest.mark.asyncio
@@ -22,13 +23,21 @@ async def test_classify_all_query_types():
 
     # Comparative
     assert processor._classify_query_type("Compare Postgres vs MySQL performance") == "comparative"
-    assert processor._classify_query_type("What is the difference between TCP and UDP?") == "comparative"
-    assert processor._classify_query_type("Pros and cons of monolithic vs microservices") == "comparative"
+    assert (
+        processor._classify_query_type("What is the difference between TCP and UDP?")
+        == "comparative"
+    )
+    assert (
+        processor._classify_query_type("Pros and cons of monolithic vs microservices")
+        == "comparative"
+    )
 
     # Procedural
     assert processor._classify_query_type("How to install Docker on Ubuntu") == "procedural"
     assert processor._classify_query_type("Step by step guide to baking bread") == "procedural"
-    assert processor._classify_query_type("Instructions for resetting router password") == "procedural"
+    assert (
+        processor._classify_query_type("Instructions for resetting router password") == "procedural"
+    )
 
 
 @pytest.mark.asyncio
@@ -76,9 +85,7 @@ async def test_query_expansion_with_llm_json():
 
 @pytest.mark.asyncio
 async def test_query_expansion_fallback_on_llm_failure():
-    mock_llm = SimpleNamespace(
-        chat=AsyncMock(side_effect=RuntimeError("LLM API rate limit"))
-    )
+    mock_llm = SimpleNamespace(chat=AsyncMock(side_effect=RuntimeError("LLM API rate limit")))
     processor = QueryProcessor(llm_client=mock_llm)
 
     # Should not raise exception; falls back gracefully

@@ -1,29 +1,32 @@
 """Unit and integration tests for EvaluationJudge orchestrator and training pair generation."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from evaluation.judge import EvaluationJudge, EvaluationReport
-from evaluation.metrics.faithfulness import FaithfulnessScore
+import pytest
+from providers.base import GenerationResult
+
+from evaluation.judge import EvaluationJudge
 from evaluation.metrics.answer_relevance import AnswerRelevanceScore
 from evaluation.metrics.context_precision import ContextPrecisionScore
 from evaluation.metrics.context_recall import ContextRecallScore
-from providers.base import GenerationResult
+from evaluation.metrics.faithfulness import FaithfulnessScore
 
 
 @pytest.fixture
 def mock_llm_judge():
     client = MagicMock()
-    client.chat = AsyncMock(return_value=GenerationResult(
-        content='{"score": 0.9, "reasoning": "High quality response"}',
-        model="gpt-4o",
-        input_tokens=100,
-        output_tokens=30,
-        latency_ms=100.0,
-        cost_usd=0.0005,
-        finish_reason="stop",
-    ))
+    client.chat = AsyncMock(
+        return_value=GenerationResult(
+            content='{"score": 0.9, "reasoning": "High quality response"}',
+            model="gpt-4o",
+            input_tokens=100,
+            output_tokens=30,
+            latency_ms=100.0,
+            cost_usd=0.0005,
+            finish_reason="stop",
+        )
+    )
     router = MagicMock()
     router.route = AsyncMock(return_value="gpt-4o")
     client.router = router
@@ -35,18 +38,24 @@ async def test_evaluation_judge_weighted_score_and_concurrency(mock_llm_judge):
     judge = EvaluationJudge(llm_client=mock_llm_judge)
 
     # Mock each metric with specific scores
-    judge.faithfulness_metric.score = AsyncMock(return_value=FaithfulnessScore(
-        score=1.0, claims=[], reasoning="Faithful", raw_response=""
-    ))
-    judge.answer_relevance_metric.score = AsyncMock(return_value=AnswerRelevanceScore(
-        score=0.9, relevance_verdict="relevant", reasoning="Relevant", raw_response=""
-    ))
-    judge.context_precision_metric.score = AsyncMock(return_value=ContextPrecisionScore(
-        score=0.8, chunk_evaluations=[], reasoning="Precise", raw_response=""
-    ))
-    judge.context_recall_metric.score = AsyncMock(return_value=ContextRecallScore(
-        score=0.7, key_facts=[], reasoning="Good recall", raw_response=""
-    ))
+    judge.faithfulness_metric.score = AsyncMock(
+        return_value=FaithfulnessScore(score=1.0, claims=[], reasoning="Faithful", raw_response="")
+    )
+    judge.answer_relevance_metric.score = AsyncMock(
+        return_value=AnswerRelevanceScore(
+            score=0.9, relevance_verdict="relevant", reasoning="Relevant", raw_response=""
+        )
+    )
+    judge.context_precision_metric.score = AsyncMock(
+        return_value=ContextPrecisionScore(
+            score=0.8, chunk_evaluations=[], reasoning="Precise", raw_response=""
+        )
+    )
+    judge.context_recall_metric.score = AsyncMock(
+        return_value=ContextRecallScore(
+            score=0.7, key_facts=[], reasoning="Good recall", raw_response=""
+        )
+    )
 
     # Mock persistence so DB is not called in unit test
     judge._persist_evaluation = AsyncMock()
@@ -88,27 +97,57 @@ async def test_evaluation_judge_training_candidate_threshold(mock_llm_judge):
     judge._persist_evaluation = AsyncMock()
 
     # Case 1: Low score (e.g. 0.50 overall) -> Not a training candidate
-    judge.faithfulness_metric.score = AsyncMock(return_value=FaithfulnessScore(score=0.5, claims=[], reasoning="", raw_response=""))
-    judge.answer_relevance_metric.score = AsyncMock(return_value=AnswerRelevanceScore(score=0.5, relevance_verdict="", reasoning="", raw_response=""))
-    judge.context_precision_metric.score = AsyncMock(return_value=ContextPrecisionScore(score=0.5, chunk_evaluations=[], reasoning="", raw_response=""))
-    judge.context_recall_metric.score = AsyncMock(return_value=ContextRecallScore(score=0.5, key_facts=[], reasoning="", raw_response=""))
+    judge.faithfulness_metric.score = AsyncMock(
+        return_value=FaithfulnessScore(score=0.5, claims=[], reasoning="", raw_response="")
+    )
+    judge.answer_relevance_metric.score = AsyncMock(
+        return_value=AnswerRelevanceScore(
+            score=0.5, relevance_verdict="", reasoning="", raw_response=""
+        )
+    )
+    judge.context_precision_metric.score = AsyncMock(
+        return_value=ContextPrecisionScore(
+            score=0.5, chunk_evaluations=[], reasoning="", raw_response=""
+        )
+    )
+    judge.context_recall_metric.score = AsyncMock(
+        return_value=ContextRecallScore(score=0.5, key_facts=[], reasoning="", raw_response="")
+    )
 
     low_report = await judge.evaluate(
-        query="Q", context="C", answer="A",
-        run_id=uuid4(), pipeline_id=uuid4(),
+        query="Q",
+        context="C",
+        answer="A",
+        run_id=uuid4(),
+        pipeline_id=uuid4(),
     )
     assert low_report.overall_score == 0.50
     assert low_report.is_training_candidate is False
 
     # Case 2: High score > 0.8 -> Training candidate
-    judge.faithfulness_metric.score = AsyncMock(return_value=FaithfulnessScore(score=0.9, claims=[], reasoning="", raw_response=""))
-    judge.answer_relevance_metric.score = AsyncMock(return_value=AnswerRelevanceScore(score=0.9, relevance_verdict="", reasoning="", raw_response=""))
-    judge.context_precision_metric.score = AsyncMock(return_value=ContextPrecisionScore(score=0.9, chunk_evaluations=[], reasoning="", raw_response=""))
-    judge.context_recall_metric.score = AsyncMock(return_value=ContextRecallScore(score=0.9, key_facts=[], reasoning="", raw_response=""))
+    judge.faithfulness_metric.score = AsyncMock(
+        return_value=FaithfulnessScore(score=0.9, claims=[], reasoning="", raw_response="")
+    )
+    judge.answer_relevance_metric.score = AsyncMock(
+        return_value=AnswerRelevanceScore(
+            score=0.9, relevance_verdict="", reasoning="", raw_response=""
+        )
+    )
+    judge.context_precision_metric.score = AsyncMock(
+        return_value=ContextPrecisionScore(
+            score=0.9, chunk_evaluations=[], reasoning="", raw_response=""
+        )
+    )
+    judge.context_recall_metric.score = AsyncMock(
+        return_value=ContextRecallScore(score=0.9, key_facts=[], reasoning="", raw_response="")
+    )
 
     high_report = await judge.evaluate(
-        query="Q", context="C", answer="A",
-        run_id=uuid4(), pipeline_id=uuid4(),
+        query="Q",
+        context="C",
+        answer="A",
+        run_id=uuid4(),
+        pipeline_id=uuid4(),
     )
     assert high_report.overall_score == 0.90
     assert high_report.is_training_candidate is True
@@ -120,6 +159,7 @@ async def test_evaluation_judge_persistence_logic(mock_llm_judge):
 
     executed_queries = []
     mock_conn = MagicMock()
+
     async def mock_execute(sql, *args):
         executed_queries.append((sql, args))
 
@@ -128,6 +168,7 @@ async def test_evaluation_judge_persistence_logic(mock_llm_judge):
     class MockPipelineConnCtx:
         async def __aenter__(self):
             return mock_conn
+
         async def __aexit__(self, *args):
             pass
 

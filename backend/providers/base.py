@@ -1,12 +1,12 @@
-
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import AsyncGenerator
 
 
 @dataclass
 class ChatMessage:
     """A message sent to or received from an LLM."""
+
     role: str
     content: str | list
 
@@ -14,6 +14,7 @@ class ChatMessage:
 @dataclass
 class GenerationResult:
     """Standard result returned by a provider."""
+
     content: str
     model: str
     input_tokens: int
@@ -27,16 +28,12 @@ class BaseLLMProvider(ABC):
     """Common interface for all LLM providers."""
 
     @abstractmethod
-    async def complete(
-        self, messages: list[ChatMessage], **kwargs
-    ) -> GenerationResult:
+    async def complete(self, messages: list[ChatMessage], **kwargs) -> GenerationResult:
         """Generate a complete response."""
         ...
 
     @abstractmethod
-    async def stream(
-        self, messages: list[ChatMessage], **kwargs
-    ) -> AsyncGenerator[str, None]:
+    async def stream(self, messages: list[ChatMessage], **kwargs) -> AsyncGenerator[str, None]:
         """Stream response text progressively."""
         ...
 

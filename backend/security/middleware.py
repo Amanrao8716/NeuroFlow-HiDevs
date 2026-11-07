@@ -11,6 +11,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         try:
             from opentelemetry import trace
+
             span = trace.get_current_span()
             if span.is_recording():
                 span.set_attribute("http.request_id", request_id)
