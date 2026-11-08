@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 if TYPE_CHECKING:
     from pipelines.retrieval.retriever import RetrievalResult
@@ -13,21 +13,25 @@ DEFAULT_RRF_K = 60
 def reciprocal_rank_fusion(
     result_lists: list[list[RetrievalResult]],
     k: int = DEFAULT_RRF_K,
+    weights: Mapping[str, float] | None = None,
 ) -> list[RetrievalResult]:
     """Fuse multiple ranked candidate lists using Reciprocal Rank Fusion (RRF).
 
     Formula:
-        score(d) = sum(1 / (k + rank_i(d))) for each list i where document d appears.
+        score(d) = sum(weight_i / (k + rank_i(d))) for each list i where d appears.
 
     Args:
         result_lists: List of ranked candidate lists.
         k: Smoothing constant (default: 60).
+        weights: Optional contribution by retrieval method (dense, sparse, metadata).
 
     Returns:
         New list of deduplicated RetrievalResult objects sorted by descending fused score.
     """
     if k <= 0:
         raise ValueError(f"RRF constant k must be positive, got {k}")
+    if weights is not None and any(value < 0 for value in weights.values()):
+        raise ValueError("RRF weights cannot be negative.")
 
     if not result_lists:
         return []
@@ -45,7 +49,8 @@ def reciprocal_rank_fusion(
             rank = item.rank if item.rank is not None else (zero_idx + 1)
             cid = item.chunk_id
             method = item.retrieval_method or "unknown"
-            increment = 1.0 / (k + rank)
+            weight = weights.get(method, 1.0) if weights is not None else 1.0
+            increment = weight / (k + rank)
 
             fused_scores[cid] = fused_scores.get(cid, 0.0) + increment
 

@@ -12,20 +12,20 @@ def test_prompt_builder_query_types():
 
     # Factual
     prompt_f = builder.build("What is pgvector?", query_type="factual")
-    assert "Provide a direct, concise answer" in prompt_f.system_prompt
+    assert "Answer directly." in prompt_f.system_prompt
     assert "What is pgvector?" in prompt_f.user_prompt
 
     # Analytical
     prompt_a = builder.build("Why compare HNSW and IVFFlat?", query_type="analytical")
-    assert "Analyze and synthesize across the provided sources" in prompt_a.system_prompt
+    assert "Separate supported observations from conclusions" in prompt_a.system_prompt
 
     # Comparative
     prompt_c = builder.build("Compare Dense and Sparse search", query_type="comparative")
-    assert "Organize your response as a structured comparison" in prompt_c.system_prompt
+    assert "Compare the requested items on the same criteria" in prompt_c.system_prompt
 
     # Procedural
     prompt_p = builder.build("How do I install postgres?", query_type="procedural")
-    assert "Provide numbered steps" in prompt_p.system_prompt
+    assert "Give ordered steps only when the context supports their order" in prompt_p.system_prompt
 
     # Unknown type defaults safely
     prompt_unknown = builder.build("Hello world", query_type="conversational")

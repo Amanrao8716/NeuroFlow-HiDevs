@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 import json
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID
 
 from opentelemetry import trace
@@ -116,6 +117,9 @@ class HybridRetriever:
         k: int = 20,
         pipeline_id: UUID | None = None,
         filters: dict[str, Any] | None = None,
+        dense_k: int | None = None,
+        sparse_k: int | None = None,
+        hnsw_ef_search: int | None = None,
     ) -> tuple[list[RetrievalResult], list[RetrievalResult], list[RetrievalResult]]:
         """Run dense, sparse, and metadata-filtered retrieval concurrently.
 
@@ -133,47 +137,56 @@ class HybridRetriever:
 
         queries_to_embed = processed.all_queries
         active_filters = processed.filters
+        dense_limit = dense_k if dense_k is not None else k
+        sparse_limit = sparse_k if sparse_k is not None else k
+        metadata_limit = max(dense_limit, sparse_limit)
 
-        # 1. Prepare dense query vectors
-        embed_fn = await self._get_embed_fn()
-        with tracer.start_as_current_span("retrieval.query_embedding") as span:
-            span.set_attribute("embedding.query_count", len(queries_to_embed))
-            try:
-                query_vectors = await embed_fn(queries_to_embed)
-            except Exception as exc:
-                logger.warning("Query embedding generation failed: %s", exc)
-                span.record_exception(exc)
-                query_vectors = []
+        # 1. Concurrently run sparse search and dense query preparation + search
+        async def _run_dense() -> tuple[list[RetrievalResult], list[float] | None]:
+            embed_fn = await self._get_embed_fn()
+            with tracer.start_as_current_span("retrieval.query_embedding") as span:
+                span.set_attribute("embedding.query_count", len(queries_to_embed))
+                try:
+                    query_vectors = await embed_fn(queries_to_embed)
+                except Exception as exc:
+                    logger.warning("Query embedding generation failed: %s", exc)
+                    span.record_exception(exc)
+                    query_vectors = []
 
-        primary_vector = query_vectors[0] if query_vectors else None
+            primary_vec = query_vectors[0] if query_vectors else None
+            dense_results = await _traced_search(
+                "retrieval.dense",
+                self._dense_search(
+                    query_vectors,
+                    k=dense_limit,
+                    pipeline_id=pipeline_id,
+                    hnsw_ef_search=hnsw_ef_search,
+                ),
+            )
+            return dense_results, primary_vec
 
-        # 2. Concurrently run retrieval branches
-        dense_task = _traced_search(
-            "retrieval.dense",
-            self._dense_search(query_vectors, k=k, pipeline_id=pipeline_id),
-        )
         sparse_task = _traced_search(
             "retrieval.sparse",
-            self._sparse_search(processed.query, k=k, pipeline_id=pipeline_id),
+            self._sparse_search(processed.query, k=sparse_limit, pipeline_id=pipeline_id),
+        )
+        dense_task = _run_dense()
+
+        (dense_res, primary_vector), sparse_res = await asyncio.gather(
+            dense_task, sparse_task, return_exceptions=False
         )
 
         if active_filters:
-            meta_task = _traced_search(
+            meta_res = await _traced_search(
                 "retrieval.metadata",
                 self._metadata_search(
                     active_filters,
                     query_vector=primary_vector,
-                    k=k,
+                    k=metadata_limit,
                     pipeline_id=pipeline_id,
+                    hnsw_ef_search=hnsw_ef_search,
                 ),
             )
-            dense_res, sparse_res, meta_res = await asyncio.gather(
-                dense_task, sparse_task, meta_task, return_exceptions=False
-            )
         else:
-            dense_res, sparse_res = await asyncio.gather(
-                dense_task, sparse_task, return_exceptions=False
-            )
             meta_res = []
 
         return dense_res, sparse_res, meta_res
@@ -212,6 +225,7 @@ class HybridRetriever:
         query_vectors: list[list[float]],
         k: int,
         pipeline_id: UUID | None,
+        hnsw_ef_search: int | None = None,
     ) -> list[RetrievalResult]:
         """Search chunks using pgvector cosine distance `<=>` for all query vectors."""
         if not query_vectors:
@@ -219,8 +233,22 @@ class HybridRetriever:
 
         best_by_chunk: dict[str, RetrievalResult] = {}
 
+        # Deduplicate identical vectors to avoid redundant pgvector queries
+        unique_vectors: list[list[float]] = []
+        seen_keys: set[tuple[float, ...]] = set()
+        for vec in query_vectors:
+            key = tuple(round(v, 6) for v in vec)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_vectors.append(vec)
+
         async with await self._acquire_connection(pipeline_id) as conn:
-            for vec in query_vectors:
+            if hnsw_ef_search is not None and pipeline_id is not None:
+                await conn.execute(
+                    "SELECT set_config('hnsw.ef_search', $1, true)",
+                    str(hnsw_ef_search),
+                )
+            for vec in unique_vectors:
                 vec_str = "[" + ",".join(str(v) for v in vec) + "]"
                 rows = await conn.fetch(
                     """
@@ -327,6 +355,7 @@ class HybridRetriever:
         query_vector: list[float] | None,
         k: int,
         pipeline_id: UUID | None,
+        hnsw_ef_search: int | None = None,
     ) -> list[RetrievalResult]:
         """Search chunks matching JSONB metadata filters, optionally ordered by vector similarity."""
         if not filters:
@@ -335,6 +364,11 @@ class HybridRetriever:
         filters_json = json.dumps(filters)
 
         async with await self._acquire_connection(pipeline_id) as conn:
+            if hnsw_ef_search is not None and pipeline_id is not None:
+                await conn.execute(
+                    "SELECT set_config('hnsw.ef_search', $1, true)",
+                    str(hnsw_ef_search),
+                )
             if query_vector:
                 vec_str = "[" + ",".join(str(v) for v in query_vector) + "]"
                 rows = await conn.fetch(

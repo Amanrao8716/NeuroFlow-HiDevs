@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 logger = logging.getLogger("neuroflow.retrieval.query_processor")
@@ -46,6 +46,7 @@ class QueryProcessor:
         self,
         query: str,
         explicit_filters: dict[str, Any] | None = None,
+        expand: bool = True,
     ) -> ProcessedQuery:
         """Process a raw user query into expanded variants, filters, and query type."""
         trimmed = query.strip()
@@ -60,7 +61,7 @@ class QueryProcessor:
         if explicit_filters:
             merged_filters.update(explicit_filters)
 
-        expanded = await self._expand_query(trimmed)
+        expanded = await self._expand_query(trimmed) if expand else []
 
         return ProcessedQuery(
             query=trimmed,
@@ -240,10 +241,23 @@ class QueryProcessor:
             clean = re.sub(r"^how (?:does|do) ", "", query, flags=re.IGNORECASE).rstrip("?")
             variants.append(f"{clean} mechanism and overview")
             variants.append(f"explaining {clean}")
+        elif q_lower.startswith("how to "):
+            clean = re.sub(r"^how to ", "", query, flags=re.IGNORECASE).rstrip("?")
+            variants.append(f"steps to {clean}")
+            variants.append(f"guide for {clean}")
         elif q_lower.startswith("what is ") or q_lower.startswith("what are "):
             clean = re.sub(r"^what (?:is|are) ", "", query, flags=re.IGNORECASE).rstrip("?")
             variants.append(f"definition of {clean}")
             variants.append(f"{clean} specification and details")
+        elif (
+            q_lower.startswith("why does ")
+            or q_lower.startswith("why do ")
+            or q_lower.startswith("why is ")
+            or q_lower.startswith("why are ")
+        ):
+            clean = re.sub(r"^why (?:does|do|is|are) ", "", query, flags=re.IGNORECASE).rstrip("?")
+            variants.append(f"causes and reasons for {clean}")
+            variants.append(f"explanation of {clean}")
         elif " vs " in q_lower or " versus " in q_lower:
             parts = re.split(r" vs\.? | versus ", query, flags=re.IGNORECASE)
             if len(parts) == 2:

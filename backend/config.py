@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     observability_service_token: str | None = None
     neuroflow_api_url: str = "http://localhost:8000"
     max_upload_size_bytes: int = Field(default=100 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
+    embedding_cache_ttl_seconds: int = Field(default=1800, ge=0, le=86400)
+    query_cache_ttl_seconds: int = Field(default=1800, ge=0, le=86400)
 
     model_config = SettingsConfigDict(
         env_file=".env",

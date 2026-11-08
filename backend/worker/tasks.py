@@ -28,7 +28,12 @@ from backend.security.prompt_injection import detect_prompt_injection
 from backend.security.secrets import redact_metadata, redact_secrets
 from backend.security.validators import sanitize_text
 from pipelines.finetuning.tracker import MLflowTracker
-from pipelines.ingestion.chunker import chunk_pages
+from pipelines.ingestion.chunker import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_OVERLAP,
+    SEMANTIC_THRESHOLD,
+    chunk_pages,
+)
 from pipelines.ingestion.csv_extractor import extract_csv
 from pipelines.ingestion.docx_extractor import extract_docx
 from pipelines.ingestion.image_extractor import extract_image
@@ -214,6 +219,18 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                 if document is None:
                     raise ValueError("Document not found for this pipeline.")
 
+                pipeline_row = await conn.fetchrow(
+                    "SELECT config FROM pipelines WHERE id = $1",
+                    tenant_id,
+                )
+                raw_pipeline_config = pipeline_row["config"] if pipeline_row else {}
+                pipeline_config = (
+                    json.loads(raw_pipeline_config)
+                    if isinstance(raw_pipeline_config, str)
+                    else raw_pipeline_config or {}
+                )
+                ingestion_config = pipeline_config.get("ingestion", {})
+
                 await conn.execute(
                     "UPDATE documents SET status = 'processing' WHERE id = $1",
                     doc_id,
@@ -271,7 +288,12 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
                 chunks = await chunk_pages(
                     pages,
                     embed=client.embed,
-                    strategy="auto",
+                    strategy=ingestion_config.get("chunking_strategy", "auto"),
+                    chunk_size=ingestion_config.get("chunk_size_tokens", DEFAULT_CHUNK_SIZE),
+                    overlap=ingestion_config.get("chunk_overlap_tokens", DEFAULT_OVERLAP),
+                    semantic_threshold=ingestion_config.get(
+                        "semantic_similarity_threshold", SEMANTIC_THRESHOLD
+                    ),
                 )
 
             if not chunks:

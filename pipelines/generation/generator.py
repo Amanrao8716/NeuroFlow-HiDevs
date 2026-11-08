@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 import json
 import logging
 import time
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass
+from typing import Any
 from uuid import UUID, uuid4
 
 from opentelemetry import trace
@@ -16,8 +17,15 @@ try:
     from db.pool import pipeline_connection
 except ImportError:
     pipeline_connection = None
-from pipelines.generation.citations import CitationTracker, ParsedCitations
-from pipelines.generation.prompt_builder import AssembledPrompt, PromptBuilder
+import hashlib
+import os
+
+from observability.tracing import inject_trace_context
+from providers.base import ChatMessage
+from providers.client import NeuroFlowClient
+
+from pipelines.generation.citations import Citation, CitationTracker, ParsedCitations
+from pipelines.generation.prompt_builder import PromptBuilder
 from pipelines.retrieval import (
     ContextAssembler,
     CrossEncoderReranker,
@@ -26,9 +34,6 @@ from pipelines.retrieval import (
     reciprocal_rank_fusion,
 )
 from pipelines.retrieval.context_assembler import TokenCounter
-from providers.base import ChatMessage
-from providers.client import NeuroFlowClient
-from observability.tracing import inject_trace_context
 
 logger = logging.getLogger("neuroflow.generation")
 tracer = trace.get_tracer("neuroflow.generation")
@@ -76,6 +81,34 @@ class GenerationResult:
         }
 
 
+def _reconstruct_parsed_citations(data: list[dict[str, Any]]) -> ParsedCitations:
+    citations = []
+    invalid_citations = []
+    cited_chunk_ids = []
+    for item in data:
+        c = Citation(
+            reference=item.get("reference", ""),
+            source_number=item.get("source_number", 0),
+            chunk_id=item.get("chunk_id"),
+            document_name=item.get("document_name"),
+            page_number=item.get("page_number"),
+            content_preview=item.get("content_preview"),
+            is_valid=item.get("is_valid", True),
+            error=item.get("error"),
+        )
+        if c.is_valid:
+            citations.append(c)
+            if c.chunk_id:
+                cited_chunk_ids.append(c.chunk_id)
+        else:
+            invalid_citations.append(c)
+    return ParsedCitations(
+        citations=citations,
+        invalid_citations=invalid_citations,
+        cited_chunk_ids=cited_chunk_ids,
+    )
+
+
 class GenerationPipeline:
     """Orchestrates query processing, hybrid retrieval, prompt assembly, streaming LLM generation,
 
@@ -93,16 +126,28 @@ class GenerationPipeline:
         citation_tracker: CitationTracker | None = None,
         token_counter: TokenCounter | None = None,
         llm_client: NeuroFlowClient | None = None,
+        query_cache_ttl_seconds: int | None = None,
     ):
         self.redis = redis_client
         self.processor = query_processor or QueryProcessor()
-        self.retriever = retriever or HybridRetriever(query_processor=self.processor)
+        self.client = llm_client or (NeuroFlowClient(redis_client) if redis_client else None)
+        self.retriever = retriever or HybridRetriever(
+            embed_fn=getattr(self.client, "embed", None) if self.client else None,
+            query_processor=self.processor,
+        )
         self.reranker = reranker or CrossEncoderReranker()
         self.assembler = assembler or ContextAssembler()
         self.prompt_builder = prompt_builder or PromptBuilder()
         self.citation_tracker = citation_tracker or CitationTracker()
         self.token_counter = token_counter or TokenCounter()
-        self.client = llm_client or (NeuroFlowClient(redis_client) if redis_client else None)
+        configured_cache_ttl = (
+            query_cache_ttl_seconds
+            if query_cache_ttl_seconds is not None
+            else int(os.getenv("QUERY_CACHE_TTL_SECONDS", "1800"))
+        )
+        if configured_cache_ttl < 0:
+            raise ValueError("query_cache_ttl_seconds cannot be negative")
+        self.query_cache_ttl_seconds = configured_cache_ttl
 
     async def _load_pipeline_config(
         self,
@@ -320,6 +365,14 @@ class GenerationPipeline:
             effective_dense_k = retrieval_cfg.get("dense_k", top_k * 2)
             effective_sparse_k = retrieval_cfg.get("sparse_k", top_k * 2)
             effective_top_k = retrieval_cfg.get("top_k_after_rerank", top_k)
+            effective_rrf_k = retrieval_cfg.get("rrf_k", 60)
+            rrf_weights = {
+                "dense": retrieval_cfg.get("dense_rrf_weight", 0.6),
+                "sparse": retrieval_cfg.get("sparse_rrf_weight", 0.4),
+                "metadata": retrieval_cfg.get("metadata_rrf_weight", 0.4),
+            }
+            hnsw_ef_search = retrieval_cfg.get("hnsw_ef_search", 40)
+            rerank_candidate_k = retrieval_cfg.get("rerank_candidate_k", 40)
             reranker_type = retrieval_cfg.get("reranker", "cross-encoder" if rerank else "none")
             apply_expansion = retrieval_cfg.get("query_expansion", True)
             apply_filters = retrieval_cfg.get("metadata_filters_enabled", True)
@@ -332,6 +385,10 @@ class GenerationPipeline:
             effective_dense_k = top_k * 2
             effective_sparse_k = top_k * 2
             effective_top_k = top_k
+            effective_rrf_k = 60
+            rrf_weights = {"dense": 0.6, "sparse": 0.4, "metadata": 0.4}
+            hnsw_ef_search = 40
+            rerank_candidate_k = 40
             reranker_type = "cross-encoder" if rerank else "none"
             apply_expansion = True
             apply_filters = True
@@ -340,20 +397,73 @@ class GenerationPipeline:
             effective_temp = temperature if temperature is not None else 0.7
             auto_evaluate = True
 
+        # Check full-query cache
+        query_cache_enabled = gen_cfg.get("query_cache_enabled", True) if cfg_dict else True
+        effective_cache_ttl = (
+            gen_cfg.get("query_cache_ttl_seconds", self.query_cache_ttl_seconds)
+            if cfg_dict
+            else self.query_cache_ttl_seconds
+        )
+        cache_key = None
+        if self.redis is not None and query_cache_enabled and effective_cache_ttl > 0:
+            cache_payload = json.dumps(
+                {
+                    "pipeline_id": str(pipeline_id),
+                    "version": effective_version,
+                    "query": query.strip().lower(),
+                    "top_k": top_k,
+                    "max_context_tokens": effective_max_tokens,
+                    "rerank": rerank,
+                    "model": effective_model,
+                    "temperature": effective_temp,
+                    "variant": (
+                        gen_cfg.get("system_prompt_variant", "default")
+                        if cfg_dict
+                        else "default"
+                    ),
+                },
+                sort_keys=True,
+            )
+            cache_key = "query_cache:v1:" + hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
+            try:
+                cached_bytes = await self.redis.get(cache_key)
+                if cached_bytes:
+                    raw_cached = (
+                        cached_bytes.decode("utf-8")
+                        if isinstance(cached_bytes, bytes)
+                        else cached_bytes
+                    )
+                    cached_data = json.loads(raw_cached)
+                    cached_latency = int((time.perf_counter() - start_time) * 1000)
+                    reconstructed_citations = _reconstruct_parsed_citations(
+                        cached_data.get("citations", [])
+                    )
+                    logger.info("Query cache hit for pipeline %s, run %s", pipeline_id, target_run_id)
+                    return GenerationResult(
+                        run_id=str(target_run_id),
+                        query=query,
+                        query_type=cached_data.get("query_type", "factual"),
+                        generation=cached_data.get("generation", ""),
+                        citations=reconstructed_citations,
+                        sources=cached_data.get("sources", []),
+                        chunks_used=cached_data.get("chunks_used", 0),
+                        input_tokens=cached_data.get("input_tokens", 0),
+                        output_tokens=cached_data.get("output_tokens", 0),
+                        latency_ms=cached_latency,
+                        model_used=cached_data.get("model_used", effective_model),
+                        cost_usd=cached_data.get("cost_usd"),
+                        status="completed",
+                        pipeline_version=effective_version,
+                        retrieval_latency_ms=cached_data.get("retrieval_latency_ms", 0),
+                    )
+            except Exception as cache_err:
+                logger.debug("Query cache read failed; proceeding with generation: %s", cache_err)
+
         retrieval_start = time.perf_counter()
 
         # 1. Query Processing
         with tracer.start_as_current_span("query.processing"):
-            if apply_expansion:
-                processed = await self.processor.process(query)
-            else:
-                from pipelines.retrieval.query_processor import ProcessedQuery
-                processed = ProcessedQuery(
-                    query=query,
-                    query_type="factual",
-                    expanded_queries=[query],
-                    filters={},
-                )
+            processed = await self.processor.process(query, expand=apply_expansion)
 
         # 2. Parallel Multi-Method Retrieval
         filters_to_apply = processed.filters if apply_filters else None
@@ -364,13 +474,20 @@ class GenerationPipeline:
                 k=retrieval_k,
                 pipeline_id=pipeline_id,
                 filters=filters_to_apply,
+                dense_k=effective_dense_k,
+                sparse_k=effective_sparse_k,
+                hnsw_ef_search=hnsw_ef_search,
             )
 
         # 3. Reciprocal Rank Fusion
         result_lists = [dense_res, sparse_res]
         if meta_res:
             result_lists.append(meta_res)
-        fused = reciprocal_rank_fusion(result_lists)
+        fused = reciprocal_rank_fusion(
+            result_lists,
+            k=effective_rrf_k,
+            weights=rrf_weights,
+        )
 
         # 4. Optional Reranking
         if reranker_type != "none" and fused:
@@ -379,7 +496,7 @@ class GenerationPipeline:
                     candidates = await self.reranker.rerank(
                         processed.query,
                         fused,
-                        top_n=40,
+                        top_n=rerank_candidate_k,
                     )
             except Exception as rerank_err:
                 logger.warning("Reranking failed, using RRF candidates: %s", rerank_err)
@@ -443,7 +560,7 @@ class GenerationPipeline:
                 cost_usd = getattr(llm_res, "cost_usd", None)
             else:
                 # Deterministic fallback if mock / testing
-                content = f"Based on the provided context [Source 1], the answer is clearly documented."
+                content = "Based on the provided context [Source 1], the answer is clearly documented."
                 in_tokens = self.token_counter.count(prompt.full_prompt)
                 out_tokens = self.token_counter.count(content)
                 used_model = effective_model
@@ -470,7 +587,36 @@ class GenerationPipeline:
                 cost_usd=cost_usd,
             )
 
-            # 11. Enqueue async eval job if auto_evaluate is enabled
+            # 11. Cache full-query response
+            if (
+                self.redis is not None
+                and cache_key
+                and query_cache_enabled
+                and effective_cache_ttl > 0
+            ):
+                try:
+                    cache_entry = {
+                        "query": query,
+                        "query_type": processed.query_type,
+                        "generation": content,
+                        "citations": parsed_citations.to_dict_list(),
+                        "sources": assembled.sources,
+                        "chunks_used": assembled.chunks_used,
+                        "input_tokens": in_tokens,
+                        "output_tokens": out_tokens,
+                        "model_used": used_model,
+                        "cost_usd": cost_usd,
+                        "retrieval_latency_ms": retrieval_latency_ms,
+                    }
+                    await self.redis.set(
+                        cache_key,
+                        json.dumps(cache_entry, separators=(",", ":")),
+                        ex=effective_cache_ttl,
+                    )
+                except Exception as cache_write_err:
+                    logger.debug("Query cache write failed: %s", cache_write_err)
+
+            # 12. Enqueue async eval job if auto_evaluate is enabled
             if auto_evaluate:
                 asyncio.create_task(
                     self._enqueue_eval_job(str(target_run_id), str(pipeline_id))
@@ -517,33 +663,63 @@ class GenerationPipeline:
         """Progressive streaming generator yielding SSE event dictionaries."""
         start_time = time.perf_counter()
 
+        effective_version, cfg_dict = await self._load_pipeline_config(pipeline_id)
+        retrieval_cfg = (cfg_dict or {}).get("retrieval", {})
+        generation_cfg = (cfg_dict or {}).get("generation", {})
+        if cfg_dict:
+            top_k = retrieval_cfg.get("top_k_after_rerank", top_k)
+            max_context_tokens = generation_cfg.get("max_context_tokens", max_context_tokens)
+            rerank_type = retrieval_cfg.get("reranker", "cross-encoder" if rerank else "none")
+        else:
+            rerank_type = "cross-encoder" if rerank else "none"
+        dense_k = retrieval_cfg.get("dense_k", top_k * 2)
+        sparse_k = retrieval_cfg.get("sparse_k", top_k * 2)
+        rrf_k = retrieval_cfg.get("rrf_k", 60)
+        rrf_weights = {
+            "dense": retrieval_cfg.get("dense_rrf_weight", 0.6),
+            "sparse": retrieval_cfg.get("sparse_rrf_weight", 0.4),
+            "metadata": retrieval_cfg.get("metadata_rrf_weight", 0.4),
+        }
+        hnsw_ef_search = retrieval_cfg.get("hnsw_ef_search", 40)
+        rerank_candidate_k = retrieval_cfg.get("rerank_candidate_k", 40)
+
         # 1. Event: retrieval_start
         yield {"type": "retrieval_start"}
 
         try:
             # 2. Query processing & Retrieval
             with tracer.start_as_current_span("query.processing"):
-                processed = await self.processor.process(query)
+                processed = await self.processor.process(
+                    query,
+                    expand=retrieval_cfg.get("query_expansion", True),
+                )
             with tracer.start_as_current_span("retrieval.hybrid"):
                 dense_res, sparse_res, meta_res = await self.retriever.retrieve_parallel(
                     query=processed,
-                    k=top_k * 2,
+                    k=max(dense_k, sparse_k),
                     pipeline_id=pipeline_id,
-                    filters=processed.filters,
+                    filters=(
+                        processed.filters
+                        if retrieval_cfg.get("metadata_filters_enabled", True)
+                        else None
+                    ),
+                    dense_k=dense_k,
+                    sparse_k=sparse_k,
+                    hnsw_ef_search=hnsw_ef_search,
                 )
 
             result_lists = [dense_res, sparse_res]
             if meta_res:
                 result_lists.append(meta_res)
-            fused = reciprocal_rank_fusion(result_lists)
+            fused = reciprocal_rank_fusion(result_lists, k=rrf_k, weights=rrf_weights)
 
-            if rerank and fused:
+            if rerank_type != "none" and fused:
                 try:
                     with tracer.start_as_current_span("retrieval.rerank"):
                         candidates = await self.reranker.rerank(
                             processed.query,
                             fused,
-                            top_n=40,
+                            top_n=rerank_candidate_k,
                         )
                 except Exception as rerank_err:
                     logger.warning("Reranking failed: %s", rerank_err)
@@ -583,6 +759,7 @@ class GenerationPipeline:
                     query=processed.query,
                     query_type=processed.query_type,
                     context=assembled,
+                    pipeline_config=cfg_dict,
                 )
 
             retrieved_uuids: list[UUID] = []
@@ -599,6 +776,7 @@ class GenerationPipeline:
                 query=query,
                 retrieved_chunk_ids=retrieved_uuids,
                 prompt=prompt.full_prompt,
+                pipeline_version=effective_version,
             )
 
             # 6. Stream tokens from LLM

@@ -58,6 +58,12 @@ class IngestionConfig(BaseModel):
         ge=0,
         description="Token overlap between adjacent chunks (must be >= 0 and < chunk_size_tokens)",
     )
+    semantic_similarity_threshold: float = Field(
+        default=0.7,
+        ge=-1.0,
+        le=1.0,
+        description="Cosine similarity below which semantic chunking starts a new chunk",
+    )
     extractors_enabled: list[ExtractorType] = Field(
         default_factory=lambda: [
             ExtractorType.PDF,
@@ -97,6 +103,42 @@ class RetrievalConfig(BaseModel):
         le=100,
         description="Number of candidates to retrieve via sparse lexical/keyword search",
     )
+    rrf_k: int = Field(
+        default=60,
+        ge=1,
+        le=1000,
+        description="Reciprocal rank fusion smoothing constant",
+    )
+    dense_rrf_weight: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Dense retrieval contribution to reciprocal rank fusion",
+    )
+    sparse_rrf_weight: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="Sparse retrieval contribution to reciprocal rank fusion",
+    )
+    metadata_rrf_weight: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="Metadata retrieval contribution to reciprocal rank fusion",
+    )
+    hnsw_ef_search: int = Field(
+        default=40,
+        ge=1,
+        le=1000,
+        description="pgvector HNSW search breadth; higher values trade latency for recall",
+    )
+    rerank_candidate_k: int = Field(
+        default=40,
+        ge=1,
+        le=200,
+        description="Maximum fused candidates scored by the reranker",
+    )
     reranker: RerankerType = Field(
         default=RerankerType.CROSS_ENCODER,
         description="Reranking method to apply across reciprocal rank fusion candidates",
@@ -118,11 +160,16 @@ class RetrievalConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_rerank_limits(self) -> RetrievalConfig:
+        if self.dense_rrf_weight + self.sparse_rrf_weight <= 0:
+            raise ValueError(
+                "At least one of dense_rrf_weight and sparse_rrf_weight must be positive"
+            )
         max_possible = self.dense_k + self.sparse_k
         if self.top_k_after_rerank > max_possible:
             raise ValueError(
                 f"top_k_after_rerank ({self.top_k_after_rerank}) cannot exceed total candidates "
-                f"retrieved from dense_k ({self.dense_k}) + sparse_k ({self.sparse_k}) = {max_possible}"
+                f"retrieved from dense_k ({self.dense_k}) + sparse_k ({self.sparse_k}) = "
+                f"{max_possible}"
             )
         return self
 
@@ -153,6 +200,16 @@ class GenerationConfig(BaseModel):
     system_prompt_variant: SystemPromptVariant = Field(
         default=SystemPromptVariant.DEFAULT,
         description="System prompt style variant ('default', 'concise', 'detailed', 'technical')",
+    )
+    query_cache_enabled: bool = Field(
+        default=True,
+        description="Whether to cache identical full-query responses in Redis",
+    )
+    query_cache_ttl_seconds: int = Field(
+        default=1800,
+        ge=0,
+        le=86400,
+        description="TTL for full-query caching in seconds (1800 = 30 min, 0 disables)",
     )
 
 

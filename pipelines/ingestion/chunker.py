@@ -111,6 +111,7 @@ async def semantic_chunks(
     pages: list[ExtractedPage],
     embed: Callable,
     threshold: float = SEMANTIC_THRESHOLD,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> list[dict[str, Any]]:
     """Split between adjacent sentences when embedding similarity drops."""
     import math
@@ -127,7 +128,11 @@ async def semantic_chunks(
     if len(vectors) != len(sentences):
         raise ValueError("Embedding count does not match sentence count.")
 
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive.")
+
     groups: list[list[tuple[str, int, str]]] = [[]]
+    group_tokens = 0
 
     for index, sentence in enumerate(sentences):
         if index > 0:
@@ -141,10 +146,12 @@ async def semantic_chunks(
                 else 0.0
             )
 
-            if similarity < threshold:
+            if similarity < threshold or group_tokens + _token_count(sentence[0]) > chunk_size:
                 groups.append([])
+                group_tokens = 0
 
         groups[-1].append(sentence)
+        group_tokens += _token_count(sentence[0])
 
     return [
         _make_chunk(
@@ -162,6 +169,7 @@ async def semantic_chunks(
 
 def hierarchical_chunks(
     pages: list[ExtractedPage],
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> list[dict[str, Any]]:
     """Create section parent chunks and subsection child chunks."""
     chunks = []
@@ -222,7 +230,7 @@ def hierarchical_chunks(
         for sentence in sentences:
             count = _token_count(sentence)
 
-            if child_content and child_tokens + count > DEFAULT_CHUNK_SIZE:
+            if child_content and child_tokens + count > chunk_size:
                 chunks.append(
                     _make_chunk(
                         child_content.strip(),
@@ -284,20 +292,28 @@ async def chunk_pages(
     pages: list[ExtractedPage],
     embed: Callable | None = None,
     strategy: str = "auto",
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    overlap: int = DEFAULT_OVERLAP,
+    semantic_threshold: float = SEMANTIC_THRESHOLD,
 ) -> list[dict[str, Any]]:
     """Chunk pages using an explicit or automatically selected strategy."""
     if strategy == "auto":
         strategy = select_strategy(pages)
 
     if strategy == "fixed_size":
-        return fixed_size_chunks(pages)
+        return fixed_size_chunks(pages, chunk_size=chunk_size, overlap=overlap)
 
     if strategy == "hierarchical":
-        return hierarchical_chunks(pages)
+        return hierarchical_chunks(pages, chunk_size=chunk_size)
 
     if strategy == "semantic":
         if embed is None:
             raise ValueError("Semantic chunking requires an embedding function.")
-        return await semantic_chunks(pages, embed)
+        return await semantic_chunks(
+            pages,
+            embed,
+            threshold=semantic_threshold,
+            chunk_size=chunk_size,
+        )
 
     raise ValueError(f"Unknown chunking strategy: {strategy}")

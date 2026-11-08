@@ -1,4 +1,8 @@
 import asyncio
+import hashlib
+import json
+import logging
+import os
 import time
 from threading import Lock
 
@@ -11,7 +15,10 @@ from .base import ChatMessage, GenerationResult
 from .openai_provider import OpenAIProvider
 from .router import ModelRouter, RoutingCriteria
 
+logger = logging.getLogger("neuroflow.providers.client")
+
 _LOCAL_EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_LOCAL_EMBEDDING_DIMENSIONS = 384
 _model_instance = None
 _model_lock = Lock()
 
@@ -38,9 +45,22 @@ def _encode_texts(texts: list[str]) -> list[list[float]]:
 class NeuroFlowClient:
     """Main client for routed LLM calls, embeddings, and metrics."""
 
-    def __init__(self, redis_client, circuit_breakers=None):
+    def __init__(
+        self,
+        redis_client,
+        circuit_breakers=None,
+        embedding_cache_ttl_seconds: int | None = None,
+    ):
         self.redis = redis_client
         self.circuit_breakers = circuit_breakers
+        configured_ttl = (
+            embedding_cache_ttl_seconds
+            if embedding_cache_ttl_seconds is not None
+            else int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS", "1800"))
+        )
+        if configured_ttl < 0:
+            raise ValueError("embedding_cache_ttl_seconds cannot be negative")
+        self.embedding_cache_ttl_seconds = configured_ttl
         self.providers = {
             "gpt-4o": OpenAIProvider(model="gpt-4o"),
             "gpt-4o-mini": OpenAIProvider(model="gpt-4o-mini"),
@@ -133,7 +153,7 @@ class NeuroFlowClient:
                 ).inc()
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate 384-dimensional embeddings using local SentenceTransformer."""
+        """Generate embeddings, using an optional Redis cache with safe fallback."""
         if not texts:
             return []
 
@@ -143,7 +163,66 @@ class NeuroFlowClient:
             span.set_attribute("embedding.count", len(texts))
 
             try:
-                embeddings = await asyncio.to_thread(_encode_texts, texts)
+                cache_keys = [
+                    "embedding:v1:"
+                    + hashlib.sha256(
+                        (_LOCAL_EMBEDDING_MODEL_NAME + "\0" + text).encode("utf-8")
+                    ).hexdigest()
+                    for text in texts
+                ]
+                embeddings_by_key: dict[str, list[float]] = {}
+
+                if self.redis is not None and self.embedding_cache_ttl_seconds:
+                    try:
+                        cached_values = await self.redis.mget(cache_keys)
+                        for key, value in zip(cache_keys, cached_values):
+                            if value is None:
+                                continue
+                            try:
+                                decoded = value.decode("utf-8") if isinstance(value, bytes) else value
+                                vector = json.loads(decoded)
+                                if (
+                                    isinstance(vector, list)
+                                    and len(vector) == _LOCAL_EMBEDDING_DIMENSIONS
+                                    and all(isinstance(item, (int, float)) for item in vector)
+                                ):
+                                    embeddings_by_key[key] = [float(item) for item in vector]
+                            except (TypeError, ValueError, json.JSONDecodeError):
+                                logger.debug("Ignoring malformed cached embedding.")
+                    except Exception:
+                        logger.debug("Embedding cache read failed; computing embeddings.", exc_info=True)
+
+                missing_texts_by_key: dict[str, str] = {}
+                for key, text in zip(cache_keys, texts):
+                    if key not in embeddings_by_key:
+                        missing_texts_by_key.setdefault(key, text)
+
+                if missing_texts_by_key:
+                    missing_keys = list(missing_texts_by_key)
+                    computed = await asyncio.to_thread(
+                        _encode_texts,
+                        [missing_texts_by_key[key] for key in missing_keys],
+                    )
+                    if len(computed) != len(missing_keys):
+                        raise ValueError("Embedding count does not match input count.")
+                    embeddings_by_key.update(zip(missing_keys, computed))
+
+                    if self.redis is not None and self.embedding_cache_ttl_seconds:
+                        try:
+                            await asyncio.gather(
+                                *(
+                                    self.redis.set(
+                                        key,
+                                        json.dumps(vector, separators=(",", ":")),
+                                        ex=self.embedding_cache_ttl_seconds,
+                                    )
+                                    for key, vector in zip(missing_keys, computed)
+                                )
+                            )
+                        except Exception:
+                            logger.debug("Embedding cache write failed.", exc_info=True)
+
+                embeddings = [embeddings_by_key[key] for key in cache_keys]
             except Exception as exc:
                 PROVIDER_CALLS.labels(
                     provider="local",
