@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import AsyncGenerator
 from threading import Lock
 
 from observability.metrics import PROVIDER_CALLS, PROVIDER_COST, PROVIDER_TOKENS
@@ -23,7 +24,7 @@ _model_instance = None
 _model_lock = Lock()
 
 
-def _get_embedding_model():
+def _get_embedding_model() -> object:
     global _model_instance
     if _model_instance is None:
         with _model_lock:
@@ -47,10 +48,10 @@ class NeuroFlowClient:
 
     def __init__(
         self,
-        redis_client,
-        circuit_breakers=None,
+        redis_client: object,
+        circuit_breakers: object = None,
         embedding_cache_ttl_seconds: int | None = None,
-    ):
+    ) -> None:
         self.redis = redis_client
         self.circuit_breakers = circuit_breakers
         configured_ttl = (
@@ -74,7 +75,7 @@ class NeuroFlowClient:
         self,
         messages: list[ChatMessage],
         routing_criteria: RoutingCriteria | None = None,
-        **kwargs,
+        **kwargs: object,
     ) -> GenerationResult:
         model_name = await self.router.route(routing_criteria)
         provider = self.providers[model_name]
@@ -122,8 +123,8 @@ class NeuroFlowClient:
         self,
         messages: list[ChatMessage],
         routing_criteria: RoutingCriteria | None = None,
-        **kwargs,
-    ):
+        **kwargs: object,
+    ) -> AsyncGenerator[str, None]:
         model_name = await self.router.route(routing_criteria)
         provider = self.providers[model_name]
         provider_name = self._provider_name(provider)
@@ -179,7 +180,9 @@ class NeuroFlowClient:
                             if value is None:
                                 continue
                             try:
-                                decoded = value.decode("utf-8") if isinstance(value, bytes) else value
+                                decoded = (
+                                    value.decode("utf-8") if isinstance(value, bytes) else value
+                                )
                                 vector = json.loads(decoded)
                                 if (
                                     isinstance(vector, list)
@@ -190,7 +193,9 @@ class NeuroFlowClient:
                             except (TypeError, ValueError, json.JSONDecodeError):
                                 logger.debug("Ignoring malformed cached embedding.")
                     except Exception:
-                        logger.debug("Embedding cache read failed; computing embeddings.", exc_info=True)
+                        logger.debug(
+                            "Embedding cache read failed; computing embeddings.", exc_info=True
+                        )
 
                 missing_texts_by_key: dict[str, str] = {}
                 for key, text in zip(cache_keys, texts):
@@ -257,5 +262,5 @@ class NeuroFlowClient:
             await pipe.execute()
 
     @staticmethod
-    def _provider_name(provider) -> str:
+    def _provider_name(provider: object) -> str:
         return "anthropic" if isinstance(provider, AnthropicProvider) else "openai"

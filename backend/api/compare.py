@@ -237,7 +237,7 @@ async def _execute_single_pipeline(
 async def compare_pipelines(
     payload: ComparePipelinesRequest,
     request: Request,
-) -> ComparePipelinesResponse:
+) -> ComparePipelinesResponse | JSONResponse:
     """Concurrently execute two pipelines for A/B comparison.
 
     - Validates both pipelines exist and are not archived.
@@ -253,7 +253,10 @@ async def compare_pipelines(
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot compare identical pipeline IDs. pipeline_a_id and pipeline_b_id must be distinct, or specify different versions.",
+                detail=(
+                    "Cannot compare identical pipeline IDs. pipeline_a_id and pipeline_b_id "
+                    "must be distinct, or specify different versions."
+                ),
             )
 
     # 2. Check existence and active status

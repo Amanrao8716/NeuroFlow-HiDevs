@@ -99,7 +99,7 @@ class TimeoutManager:
 
     def __init__(
         self,
-        redis=None,
+        redis: object = None,
         *,
         custom_defaults: dict[str, float] | None = None,
     ) -> None:

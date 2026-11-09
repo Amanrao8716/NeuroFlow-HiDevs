@@ -38,9 +38,7 @@ except ImportError:
 from backend.security.auth import get_current_user, require_scope
 from backend.security.validators import sanitize_text
 
-router = APIRouter(
-    prefix="/pipelines", tags=["Admin"], dependencies=[Depends(get_current_user)]
-)
+router = APIRouter(prefix="/pipelines", tags=["Admin"], dependencies=[Depends(get_current_user)])
 logger = logging.getLogger("neuroflow.api.pipelines")
 
 
@@ -69,10 +67,12 @@ class QualityAnomalyResponse(BaseModel):
     cooldown_suppressed: bool
 
 
-def _decode_suggestions(value: Any) -> list[SuggestionItem]:
+def _decode_suggestions(value: object) -> list[SuggestionItem]:
     if isinstance(value, str):
         value = json.loads(value)
-    return [SuggestionItem(**item) for item in value]
+    if isinstance(value, list):
+        return [SuggestionItem(**item) for item in value]
+    return []
 
 
 def calculate_percentile(data: list[float], p: float) -> float | None:
@@ -131,7 +131,10 @@ def deep_merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]
     ),
     response_description="Created pipeline with assigned ID, version 1, and full configuration.",
 )
-async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require_scope("admin"))):
+async def create_pipeline(
+    payload: PipelineCreateRequest,
+    _admin: object = Depends(require_scope("admin")),
+) -> PipelineResponse:
     """Validate and create a new RAG pipeline, establishing version 1."""
     payload.name = sanitize_text(payload.name).strip()
     if payload.description is not None:
@@ -162,7 +165,9 @@ async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require
             # 1. Insert into pipelines table
             await conn.execute(
                 """
-                INSERT INTO pipelines (id, name, description, config, version, status, created_at, updated_at)
+                INSERT INTO pipelines (
+                    id, name, description, config, version, status, created_at, updated_at
+                )
                 VALUES ($1, $2, $3, $4::jsonb, 1, 'active', $5, $5)
                 """,
                 pipeline_id,
@@ -175,7 +180,9 @@ async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require
             # 2. Insert immutable version 1 record
             await conn.execute(
                 """
-                INSERT INTO pipeline_versions (id, pipeline_id, version, config, description, created_at)
+                INSERT INTO pipeline_versions (
+                    id, pipeline_id, version, config, description, created_at
+                )
                 VALUES ($1, $2, 1, $3::jsonb, $4, $5)
                 """,
                 uuid4(),
@@ -201,12 +208,16 @@ async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require
     "",
     response_model=list[PipelineResponse],
     summary="List pipelines",
-    description="Return all active pipelines with current version and run statistics. **Requires scope**: `query`",
+    description=(
+        "Return all active pipelines with current version and run statistics. "
+        "**Requires scope**: `query`"
+    ),
     response_description="Array of pipeline objects with config and run_count.",
 )
 async def list_pipelines(
-    include_archived: bool = Query(default=False), _scope=Depends(require_scope("query"))
-):
+    include_archived: bool = Query(default=False),
+    _scope: object = Depends(require_scope("query")),
+) -> list[PipelineResponse]:
     """List non-archived pipelines with their current version and configuration."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -215,7 +226,8 @@ async def list_pipelines(
         status_filter = "" if include_archived else "WHERE p.status = 'active'"
         rows = await conn.fetch(
             f"""
-            SELECT p.id, p.name, p.description, p.config, p.version, p.status, p.created_at, p.updated_at,
+            SELECT p.id, p.name, p.description, p.config, p.version,
+                   p.status, p.created_at, p.updated_at,
                    COUNT(r.id) as run_count,
                    MAX(r.created_at) as last_run_at
             FROM pipelines p
@@ -254,10 +266,16 @@ async def list_pipelines(
     "/{pipeline_id}",
     response_model=PipelineResponse,
     summary="Get pipeline",
-    description="Retrieve a pipeline by ID including aggregate evaluation metrics. **Requires scope**: `query`",
+    description=(
+        "Retrieve a pipeline by ID including aggregate evaluation metrics. "
+        "**Requires scope**: `query`"
+    ),
     response_description="Full pipeline details including aggregate evaluation scores.",
 )
-async def get_pipeline(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
+async def get_pipeline(
+    pipeline_id: UUID,
+    _scope: object = Depends(require_scope("query")),
+) -> PipelineResponse:
     """Retrieve full pipeline configuration, current version, and aggregate evaluation scores."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -340,8 +358,10 @@ async def get_pipeline(pipeline_id: UUID, _scope=Depends(require_scope("query"))
     response_description="Updated pipeline at the new version.",
 )
 async def update_pipeline(
-    pipeline_id: UUID, payload: PipelineUpdateRequest, _admin=Depends(require_scope("admin"))
-):
+    pipeline_id: UUID,
+    payload: PipelineUpdateRequest,
+    _admin: object = Depends(require_scope("admin")),
+) -> PipelineResponse:
     """Update pipeline configuration and create a new immutable version.
 
     Nested configuration objects (ingestion, retrieval, generation, evaluation)
@@ -352,7 +372,10 @@ async def update_pipeline(
 
     async with connection() as conn:
         row = await conn.fetchrow(
-            "SELECT id, name, description, config, version, status FROM pipelines WHERE id = $1 FOR UPDATE",
+            """
+            SELECT id, name, description, config, version, status
+            FROM pipelines WHERE id = $1 FOR UPDATE
+            """,
             pipeline_id,
         )
         if not row:
@@ -436,7 +459,9 @@ async def update_pipeline(
             # 2. Insert new immutable version row
             await conn.execute(
                 """
-                INSERT INTO pipeline_versions (id, pipeline_id, version, config, description, created_at)
+                INSERT INTO pipeline_versions (
+                    id, pipeline_id, version, config, description, created_at
+                )
                 VALUES ($1, $2, $3, $4::jsonb, $5, $6)
                 """,
                 uuid4(),
@@ -462,10 +487,16 @@ async def update_pipeline(
 @router.delete(
     "/{pipeline_id}",
     summary="Archive pipeline",
-    description="Soft-delete pipeline by setting status to archived. Preserves all historical data. **Requires scope**: `admin`",
+    description=(
+        "Soft-delete pipeline by setting status to archived. "
+        "Preserves all historical data. **Requires scope**: `admin`"
+    ),
     response_description="Confirmation of pipeline archival with pipeline ID and new status.",
 )
-async def delete_pipeline(pipeline_id: UUID, _admin=Depends(require_scope("admin"))):
+async def delete_pipeline(
+    pipeline_id: UUID,
+    _admin: object = Depends(require_scope("admin")),
+) -> dict[str, str]:
     """Soft-delete pipeline by archiving status. Preserves all runs and historical versions."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -494,15 +525,18 @@ async def delete_pipeline(pipeline_id: UUID, _admin=Depends(require_scope("admin
     "/{pipeline_id}/runs",
     response_model=PaginatedRunsResponse,
     summary="List pipeline runs",
-    description="Paginated query execution history with latency, token counts, cost, and evaluation scores. **Requires scope**: `query`",
+    description=(
+        "Paginated query execution history with latency, token counts, cost, "
+        "and evaluation scores. **Requires scope**: `query`"
+    ),
     response_description="Paginated run items with metrics and evaluation scores.",
 )
 async def get_pipeline_runs(
     pipeline_id: UUID,
     page: int = Query(default=1, ge=1, description="Page number"),
     page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
-    _scope=Depends(require_scope("query")),
-):
+    _scope: object = Depends(require_scope("query")),
+) -> PaginatedRunsResponse:
     """Paginated list of execution runs for this pipeline with metrics and evaluation scores."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -532,7 +566,8 @@ async def get_pipeline_runs(
                    e.context_precision, e.context_recall
             FROM pipeline_runs r
             LEFT JOIN LATERAL (
-                SELECT overall_score, faithfulness, answer_relevance, context_precision, context_recall
+                SELECT overall_score, faithfulness, answer_relevance,
+                       context_precision, context_recall
                 FROM evaluations
                 WHERE run_id = r.id
                 ORDER BY evaluated_at DESC
@@ -584,10 +619,16 @@ async def get_pipeline_runs(
     "/{pipeline_id}/analytics",
     response_model=AnalyticsResponse,
     summary="Pipeline analytics",
-    description="Compute latency percentiles, evaluation averages, cost per query, and 30-day trends. **Requires scope**: `query`",
+    description=(
+        "Compute latency percentiles, evaluation averages, cost per query, "
+        "and 30-day trends. **Requires scope**: `query`"
+    ),
     response_description="Analytics including latency percentiles, cost, and time-series data.",
 )
-async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
+async def get_pipeline_analytics(
+    pipeline_id: UUID,
+    _scope: object = Depends(require_scope("query")),
+) -> AnalyticsResponse:
     """Compute latency percentiles, evaluation aggregates, cost, and 30-day query trends."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -778,10 +819,16 @@ async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope
     "/{pipeline_id}/suggestions",
     response_model=SuggestionsResponse,
     summary="Get optimization suggestions",
-    description="Analyze recent evaluations and return rule-based advisory improvement suggestions. **Requires scope**: `query`",
-    response_description="List of prioritized improvement suggestions with proposed config changes.",
+    description=(
+        "Analyze recent evaluations and return rule-based advisory suggestions. "
+        "**Requires scope**: `query`"
+    ),
+    response_description="List of prioritized suggestions with proposed changes.",
 )
-async def get_pipeline_suggestions(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
+async def get_pipeline_suggestions(
+    pipeline_id: UUID,
+    _scope: object = Depends(require_scope("query")),
+) -> SuggestionsResponse:
     """Analyze recent evaluation metrics and return advisory rule-based optimization suggestions."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")
@@ -801,7 +848,8 @@ async def get_pipeline_suggestions(pipeline_id: UUID, _scope=Depends(require_sco
         # Retrieve recent evaluation records
         eval_rows = await conn.fetch(
             """
-            SELECT e.faithfulness, e.answer_relevance, e.context_precision, e.context_recall, e.overall_score
+            SELECT e.faithfulness, e.answer_relevance, e.context_precision,
+                   e.context_recall, e.overall_score
             FROM evaluations e
             JOIN pipeline_runs r ON r.id = e.run_id
             WHERE r.pipeline_id = $1
@@ -843,7 +891,7 @@ async def record_quality_anomaly(
     payload: QualityAnomalyRequest,
     authorization: str | None = Header(default=None),
     service_token: str | None = Header(default=None, alias="X-Observability-Service-Token"),
-    _scope=Depends(require_scope("observability")),
+    _scope: object = Depends(require_scope("observability")),
 ) -> QualityAnomalyResponse:
     """Persist a worker-detected anomaly using the internal bearer credential."""
     expected_token = settings.observability_service_token

@@ -24,7 +24,7 @@ class AnthropicProvider(BaseLLMProvider):
         self,
         model: str = "claude-3-5-haiku-latest",
         client: AsyncAnthropic | None = None,
-    ):
+    ) -> None:
         self.model = model
         self.client = client or AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -64,7 +64,7 @@ class AnthropicProvider(BaseLLMProvider):
     async def complete(
         self,
         messages: list[ChatMessage],
-        **kwargs,
+        **kwargs: object,
     ) -> GenerationResult:
         start = time.perf_counter()
         system, formatted = self._format_messages(messages)
@@ -106,7 +106,7 @@ class AnthropicProvider(BaseLLMProvider):
     async def stream(
         self,
         messages: list[ChatMessage],
-        **kwargs,
+        **kwargs: object,
     ) -> AsyncGenerator[str, None]:
         system, formatted = self._format_messages(messages)
 

@@ -169,7 +169,7 @@ class QueryResponse(BaseModel):
                 "run_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
                 "query": "How does RRF work?",
                 "query_type": "technical",
-                "answer": "RRF combines ranks from multiple retrievers using reciprocal rank scoring [1].",
+                "answer": "RRF combines ranks using reciprocal rank scoring [1].",
                 "citations": [
                     {
                         "reference": "[1]",
@@ -193,18 +193,42 @@ class QueryResponse(BaseModel):
         }
     )
 
-    run_id: str = Field(..., description="Unique ID for this query pipeline run", examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"])
+    run_id: str = Field(
+        ...,
+        description="Unique ID for this query pipeline run",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+    )
     query: str = Field(..., description="Original user query", examples=["How does RRF work?"])
-    query_type: str = Field(..., description="Classified intent (e.g. technical, factual, comparison)", examples=["technical"])
-    answer: str = Field(..., description="Generated answer with reference markers", examples=["RRF combines ranks..."])
-    citations: list[CitationItem] = Field(default_factory=list, description="Extracted and verified citations")
-    sources: list[dict[str, Any]] = Field(default_factory=list, description="Retrieved source chunks metadata")
-    chunks_used: int = Field(..., description="Count of retrieved chunks assembled into context", examples=[1])
+    query_type: str = Field(
+        ...,
+        description="Classified intent (e.g. technical, factual, comparison)",
+        examples=["technical"],
+    )
+    answer: str = Field(
+        ...,
+        description="Generated answer with reference markers",
+        examples=["RRF combines ranks..."],
+    )
+    citations: list[CitationItem] = Field(
+        default_factory=list, description="Extracted and verified citations"
+    )
+    sources: list[dict[str, Any]] = Field(
+        default_factory=list, description="Retrieved source chunks metadata"
+    )
+    chunks_used: int = Field(
+        ..., description="Count of retrieved chunks assembled into context", examples=[1]
+    )
     input_tokens: int = Field(..., description="Prompt token count", examples=[350])
     output_tokens: int = Field(..., description="Completion token count", examples=[45])
-    latency_ms: int = Field(..., description="Total execution latency in milliseconds", examples=[420])
-    model_used: str = Field(..., description="Model identifier used for generation", examples=["gpt-4o-mini"])
-    status: str = Field(..., description="Execution status ('completed' or 'failed')", examples=["completed"])
+    latency_ms: int = Field(
+        ..., description="Total execution latency in milliseconds", examples=[420]
+    )
+    model_used: str = Field(
+        ..., description="Model identifier used for generation", examples=["gpt-4o-mini"]
+    )
+    status: str = Field(
+        ..., description="Execution status ('completed' or 'failed')", examples=["completed"]
+    )
 
 
 class StreamInitResponse(BaseModel):
@@ -220,9 +244,19 @@ class StreamInitResponse(BaseModel):
         }
     )
 
-    run_id: str = Field(..., description="UUID assigned to this streaming execution run", examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"])
-    stream_url: str = Field(..., description="Relative URL to subscribe for Server-Sent Events", examples=["/query/3fa85f64-5717-4562-b3fc-2c963f66afa6/stream"])
-    status: str = Field(default="running", description="Initial streaming status", examples=["running"])
+    run_id: str = Field(
+        ...,
+        description="UUID assigned to this streaming execution run",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+    )
+    stream_url: str = Field(
+        ...,
+        description="Relative URL to subscribe for Server-Sent Events",
+        examples=["/query/3fa85f64-5717-4562-b3fc-2c963f66afa6/stream"],
+    )
+    status: str = Field(
+        default="running", description="Initial streaming status", examples=["running"]
+    )
 
 
 # In-memory registry fallback for streaming tasks (backed by Redis when available)
@@ -239,7 +273,7 @@ _active_streams: dict[str, dict[str, Any]] = {}
     ),
     response_description="QueryResponse (stream=false) or StreamInitResponse (stream=true).",
 )
-async def post_query(request: QueryRequest, req: Request):
+async def post_query(request: QueryRequest, req: Request) -> QueryResponse | StreamInitResponse:
     """Execute RAG generation pipeline.
 
     If stream=false, returns complete JSON response with citations and metadata.
@@ -328,12 +362,13 @@ async def post_query(request: QueryRequest, req: Request):
     "/query/{run_id}/stream",
     summary="Stream query results via SSE",
     description=(
-        "Connect after POST /query with stream=true. Returns text/event-stream of generation events.\n\n"
+        "Connect after POST /query with stream=true. "
+        "Returns text/event-stream of generation events.\n\n"
         "**Requires scope**: `query`"
     ),
     response_description="SSE stream of generation events.",
 )
-async def get_query_stream(run_id: UUID, req: Request):
+async def get_query_stream(run_id: UUID, req: Request) -> EventSourceResponse:
     """Server-Sent Events endpoint streaming retrieval and token events."""
     run_id_str = str(run_id)
     pipeline = get_generation_pipeline(req)

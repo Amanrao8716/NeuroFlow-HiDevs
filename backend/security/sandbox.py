@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from pipelines.ingestion.models import ExtractedPage
 
@@ -17,7 +18,9 @@ SANDBOX_TIMEOUT_SECONDS = 60
 
 
 class DockerExtractionSandbox:
-    def __init__(self, image: str | None = None, runner: Callable = subprocess.run):
+    def __init__(
+        self, image: str | None = None, runner: Callable[..., Any] = subprocess.run
+    ) -> None:
         self.image = image or os.environ.get("NEUROFLOW_EXTRACTION_IMAGE", "neuroflow-api:latest")
         self.runner = runner
 

@@ -6,7 +6,6 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
-from typing import Any
 from uuid import UUID
 
 import httpx
@@ -37,6 +36,7 @@ from pipelines.ingestion.chunker import (
 from pipelines.ingestion.csv_extractor import extract_csv
 from pipelines.ingestion.docx_extractor import extract_docx
 from pipelines.ingestion.image_extractor import extract_image
+from pipelines.ingestion.models import ExtractedPage
 from pipelines.ingestion.pdf_extractor import extract_pdf
 from pipelines.ingestion.url_extractor import extract_url
 
@@ -44,7 +44,7 @@ logger = logging.getLogger("neuroflow.ingestion")
 tracer = trace.get_tracer("neuroflow.ingestion")
 
 
-def secure_extracted_pages(pages, document_id: str):
+def secure_extracted_pages(pages: list[ExtractedPage], document_id: str) -> list[ExtractedPage]:
     """Sanitize page content and metadata before chunking or embedding."""
     for page in pages:
         page.content = sanitize_text(page.content)
@@ -68,7 +68,7 @@ def secure_extracted_pages(pages, document_id: str):
     return pages
 
 
-async def startup(ctx):
+async def startup(ctx: dict[str, object]) -> None:
     """Initialize resources used by arq workers."""
     from db.pool import open_pool
 
@@ -85,7 +85,7 @@ async def startup(ctx):
     logger.info("Ingestion worker started.")
 
 
-async def shutdown(ctx):
+async def shutdown(ctx: dict[str, object]) -> None:
     """Release worker resources."""
     from db.pool import close_pool
 
@@ -111,7 +111,7 @@ async def shutdown(ctx):
     logger.info("Ingestion worker stopped.")
 
 
-async def _evaluation_queue_consumer(ctx):
+async def _evaluation_queue_consumer(ctx: dict[str, object]) -> None:
     """Consume legacy evaluation-list messages and run each evaluation once."""
     redis = ctx["redis"]
     queue_key = "neuroflow:queue:evaluations"
@@ -165,7 +165,7 @@ async def _evaluation_queue_consumer(ctx):
                 logger.exception("Could not refresh the evaluation queue depth.")
 
 
-async def _evaluation_metrics_refresher():
+async def _evaluation_metrics_refresher() -> None:
     """Keep rolling evaluation gauges current for pipelines seen by this worker."""
     from observability.quality import (
         known_pipeline_ids,
@@ -185,7 +185,7 @@ async def _evaluation_metrics_refresher():
         await asyncio.sleep(60)
 
 
-async def process_document(ctx, document_id: str, pipeline_id: str):
+async def process_document(ctx: dict[str, object], document_id: str, pipeline_id: str) -> None:
     """Extract, chunk, embed, and persist one document."""
     started = time.perf_counter()
     doc_id = UUID(document_id)
@@ -394,11 +394,11 @@ async def process_document(ctx, document_id: str, pipeline_id: str):
 
 
 async def evaluate_pipeline_run(
-    ctx,
+    ctx: dict[str, object],
     run_id: str,
     pipeline_id: str,
     trace_context: dict[str, str] | None = None,
-):
+) -> None:
     """Asynchronously evaluate a completed RAG pipeline run using LLM-as-a-judge."""
     from evaluation.judge import EvaluationJudge
 
@@ -566,7 +566,9 @@ async def _submit_quality_anomaly(
         )
 
 
-async def poll_finetune_job(ctx, job_id: str, openai_client: Any = None):
+async def poll_finetune_job(
+    ctx: dict[str, object], job_id: str, openai_client: object = None
+) -> dict[str, object] | None:
     """Poll asynchronous provider fine-tuning job status and handle terminal states."""
     import os
 

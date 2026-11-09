@@ -58,9 +58,9 @@ def known_pipeline_ids() -> tuple[str, ...]:
         return tuple(_known_pipeline_ids)
 
 
-async def refresh_rolling_evaluation_metrics(conn, pipeline_id: str) -> None:
+async def refresh_rolling_evaluation_metrics(conn: object, pipeline_id: str) -> None:
     """Refresh rolling 24-hour score gauges from persisted evaluation rows."""
-    rows = await conn.fetch(
+    rows = await conn.fetch(  # type: ignore[attr-defined]
         """
         SELECT AVG(e.faithfulness) AS faithfulness,
                AVG(e.answer_relevance) AS answer_relevance,

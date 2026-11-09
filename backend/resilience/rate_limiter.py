@@ -80,7 +80,7 @@ PROVIDER_CONFIGS: dict[str, BucketConfig] = {
 }
 
 
-class RateLimitExceeded(Exception):
+class RateLimitExceededError(Exception):
     """Raised when the rate limiter cannot grant tokens within max_wait."""
 
     def __init__(self, bucket: str, retry_after: float) -> None:
@@ -89,6 +89,9 @@ class RateLimitExceeded(Exception):
         super().__init__(
             f"Rate limit exceeded for bucket '{bucket}'. Retry after {retry_after:.1f}s."
         )
+
+
+RateLimitExceeded = RateLimitExceededError
 
 
 # ---------------------------------------------------------------------------
@@ -141,12 +144,12 @@ class RateLimiter:
 
     def __init__(
         self,
-        redis,
+        redis: object,
         name: str,
         *,
         config: BucketConfig | None = None,
         max_wait_seconds: float = 60.0,
-        _clock=None,  # injectable for tests
+        _clock: object = None,  # injectable for tests
     ) -> None:
         self._redis = redis
         self._name = name
@@ -235,7 +238,7 @@ class RateLimiter:
 
 
 def pipeline_rate_limiter(
-    redis,
+    redis: object,
     pipeline_id: str,
     rate_limit_rpm: int = 60,
     max_wait_seconds: float = 60.0,

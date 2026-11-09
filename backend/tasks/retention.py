@@ -12,9 +12,7 @@ and acquire a Redis distributed lock to prevent overlap across replicas.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 from datetime import UTC, datetime, timedelta
 
 try:
@@ -29,13 +27,13 @@ LOCK_KEY = "neuroflow:lock:retention"
 LOCK_TTL_SECONDS = 3600  # 1 hour max
 
 
-async def _acquire_lock(redis_client) -> bool:  # type: ignore[type-arg]
+async def _acquire_lock(redis_client: object) -> bool:
     """Acquire a distributed Redis lock via SET NX EX."""
     if redis_client is None:
         # No Redis — allow execution (single-instance mode).
         return True
     try:
-        acquired = await redis_client.set(
+        acquired = await redis_client.set(  # type: ignore[attr-defined]
             LOCK_KEY,
             datetime.now(UTC).isoformat(),
             nx=True,
@@ -47,28 +45,28 @@ async def _acquire_lock(redis_client) -> bool:  # type: ignore[type-arg]
         return True
 
 
-async def _release_lock(redis_client) -> None:  # type: ignore[type-arg]
+async def _release_lock(redis_client: object) -> None:
     """Release the distributed retention lock."""
     if redis_client is None:
         return
     try:
-        await redis_client.delete(LOCK_KEY)
+        await redis_client.delete(LOCK_KEY)  # type: ignore[attr-defined]
     except Exception:
         logger.warning("Failed to release Redis retention lock.")
 
 
-async def _execute_in_tx(conn, query: str, *args) -> str:
+async def _execute_in_tx(conn: object, query: str, *args: object) -> str:
     """Execute a query wrapped in an async transaction if supported."""
     tx_fn = getattr(conn, "transaction", None)
     if tx_fn is not None and callable(tx_fn):
         tx = tx_fn()
         if hasattr(tx, "__aenter__"):
             async with tx:
-                return await conn.execute(query, *args)
-    return await conn.execute(query, *args)
+                return str(await conn.execute(query, *args))  # type: ignore[attr-defined]
+    return str(await conn.execute(query, *args))  # type: ignore[attr-defined]
 
 
-async def _delete_old_runs(conn, cutoff: datetime) -> int:
+async def _delete_old_runs(conn: object, cutoff: datetime) -> int:
     """Delete completed pipeline_runs with no evaluation, older than cutoff."""
     total_deleted = 0
     while True:
@@ -96,7 +94,7 @@ async def _delete_old_runs(conn, cutoff: datetime) -> int:
     return total_deleted
 
 
-async def _delete_old_evaluations(conn, cutoff: datetime) -> int:
+async def _delete_old_evaluations(conn: object, cutoff: datetime) -> int:
     """Delete evaluation records older than cutoff."""
     total_deleted = 0
     while True:
@@ -120,7 +118,7 @@ async def _delete_old_evaluations(conn, cutoff: datetime) -> int:
     return total_deleted
 
 
-async def _delete_archived_chunks(conn) -> int:
+async def _delete_archived_chunks(conn: object) -> int:
     """Delete chunks belonging to documents with status='archived'."""
     total_deleted = 0
     while True:
@@ -146,8 +144,8 @@ async def _delete_archived_chunks(conn) -> int:
 
 
 async def run_retention(
-    conn=None,
-    redis_client=None,  # type: ignore[type-arg]
+    conn: object = None,
+    redis_client: object = None,
     *,
     run_days: int | None = None,
     eval_days: int | None = None,
@@ -163,22 +161,16 @@ async def run_retention(
     Returns:
         Dict with counts: ``runs_deleted``, ``evaluations_deleted``, ``chunks_deleted``.
     """
-    run_days = (
-        run_days
-        if run_days is not None
-        else getattr(settings, "retention_run_days", 90)
-    )
+    run_days = run_days if run_days is not None else getattr(settings, "retention_run_days", 90)
     eval_days = (
-        eval_days
-        if eval_days is not None
-        else getattr(settings, "retention_eval_days", 180)
+        eval_days if eval_days is not None else getattr(settings, "retention_eval_days", 180)
     )
 
     if not await _acquire_lock(redis_client):
         logger.info("Retention job skipped — another instance holds the lock.")
         return {"runs_deleted": 0, "evaluations_deleted": 0, "chunks_deleted": 0}
 
-    async def _execute_with_conn(c):
+    async def _execute_with_conn(c: object) -> dict[str, int]:
         now = datetime.now(UTC)
         run_cutoff = now - timedelta(days=run_days)
         eval_cutoff = now - timedelta(days=eval_days)
@@ -210,13 +202,14 @@ async def run_retention(
             return await _execute_with_conn(conn)
         else:
             from db.pool import connection
+
             async with connection() as active_conn:
                 return await _execute_with_conn(active_conn)
     finally:
         await _release_lock(redis_client)
 
 
-async def retention_worker_task(ctx: dict) -> dict[str, int]:
+async def retention_worker_task(ctx: dict[str, object]) -> dict[str, int]:
     """ARQ worker task entry point."""
     redis_client = ctx.get("redis")
     return await run_retention(redis_client=redis_client)

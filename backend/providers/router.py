@@ -17,11 +17,11 @@ class RoutingCriteria:
 class ModelRouter:
     """Select a registered model that satisfies routing constraints."""
 
-    def __init__(self, redis_client, providers: dict[str, BaseLLMProvider]):
+    def __init__(self, redis_client: object, providers: dict[str, BaseLLMProvider]) -> None:
         self.redis = redis_client
         self.providers = providers
 
-    async def _get_models(self) -> list[dict]:
+    async def _get_models(self) -> list[dict[str, object]]:
         """Read model registrations from Redis."""
         raw_models = await self.redis.hgetall("router:models")
         models = []

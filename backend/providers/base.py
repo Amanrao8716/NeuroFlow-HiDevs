@@ -28,12 +28,14 @@ class BaseLLMProvider(ABC):
     """Common interface for all LLM providers."""
 
     @abstractmethod
-    async def complete(self, messages: list[ChatMessage], **kwargs) -> GenerationResult:
+    async def complete(self, messages: list[ChatMessage], **kwargs: object) -> GenerationResult:
         """Generate a complete response."""
         ...
 
     @abstractmethod
-    async def stream(self, messages: list[ChatMessage], **kwargs) -> AsyncGenerator[str, None]:
+    async def stream(
+        self, messages: list[ChatMessage], **kwargs: object
+    ) -> AsyncGenerator[str, None]:
         """Stream response text progressively."""
         ...
 

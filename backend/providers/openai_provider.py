@@ -26,7 +26,7 @@ class OpenAIProvider(BaseLLMProvider):
         model: str = "gpt-4o-mini",
         client: AsyncOpenAI | None = None,
         embedding_model: str = "text-embedding-3-small",
-    ):
+    ) -> None:
         self.model = model
         self.embedding_model = embedding_model
         self.client = client or AsyncOpenAI(
@@ -47,14 +47,14 @@ class OpenAIProvider(BaseLLMProvider):
         return self.MODEL_CONTEXT.get(self.model, 128000)
 
     @staticmethod
-    def _format_messages(messages: list[ChatMessage]) -> list[dict]:
+    def _format_messages(messages: list[ChatMessage]) -> list[dict[str, str]]:
         return [{"role": message.role, "content": message.content} for message in messages]
 
-    async def _create_completion(self, **kwargs):
+    async def _create_completion(self, **kwargs: object) -> object:
         """Retry rate-limit errors up to three times."""
         for attempt in range(4):
             try:
-                return await self.client.chat.completions.create(**kwargs)
+                return await self.client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
             except RateLimitError as exc:
                 if attempt == 3:
                     raise
@@ -70,7 +70,7 @@ class OpenAIProvider(BaseLLMProvider):
     async def complete(
         self,
         messages: list[ChatMessage],
-        **kwargs,
+        **kwargs: object,
     ) -> GenerationResult:
         start = time.perf_counter()
 
@@ -106,7 +106,7 @@ class OpenAIProvider(BaseLLMProvider):
     async def stream(
         self,
         messages: list[ChatMessage],
-        **kwargs,
+        **kwargs: object,
     ) -> AsyncGenerator[str, None]:
         model = kwargs.pop("model", self.model)
 

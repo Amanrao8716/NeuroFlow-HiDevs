@@ -72,17 +72,45 @@ class RatingResponse(BaseModel):
         }
     )
 
-    run_id: str = Field(..., description="ID of the pipeline run rated", examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"])
+    run_id: str = Field(
+        ...,
+        description="ID of the pipeline run rated",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+    )
     user_rating: int = Field(..., description="Submitted human rating (1-5)", examples=[5])
-    normalized_rating: float = Field(..., description="Rating normalized to 0.0-1.0 scale", examples=[1.0])
-    overall_score: float | None = Field(None, description="Automated judge overall quality score", examples=[0.92])
-    calibration_needed: bool = Field(..., description="True when user rating diverges from judge score by > 0.3", examples=[False])
-    discrepancy: float | None = Field(None, description="Absolute difference between judge score and normalized rating", examples=[0.08])
-    faithfulness: float | None = Field(None, description="Judge faithfulness score (0-1)", examples=[0.95])
-    answer_relevance: float | None = Field(None, description="Judge answer relevance score (0-1)", examples=[0.90])
-    context_precision: float | None = Field(None, description="Judge context precision score (0-1)", examples=[0.88])
-    context_recall: float | None = Field(None, description="Judge context recall score (0-1)", examples=[0.92])
-    message: str = Field(..., description="Descriptive status message", examples=["Rating 5 recorded. Score is well calibrated."])
+    normalized_rating: float = Field(
+        ..., description="Rating normalized to 0.0-1.0 scale", examples=[1.0]
+    )
+    overall_score: float | None = Field(
+        None, description="Automated judge overall quality score", examples=[0.92]
+    )
+    calibration_needed: bool = Field(
+        ...,
+        description="True when user rating diverges from judge score by > 0.3",
+        examples=[False],
+    )
+    discrepancy: float | None = Field(
+        None,
+        description="Absolute difference between judge score and normalized rating",
+        examples=[0.08],
+    )
+    faithfulness: float | None = Field(
+        None, description="Judge faithfulness score (0-1)", examples=[0.95]
+    )
+    answer_relevance: float | None = Field(
+        None, description="Judge answer relevance score (0-1)", examples=[0.90]
+    )
+    context_precision: float | None = Field(
+        None, description="Judge context precision score (0-1)", examples=[0.88]
+    )
+    context_recall: float | None = Field(
+        None, description="Judge context recall score (0-1)", examples=[0.92]
+    )
+    message: str = Field(
+        ...,
+        description="Descriptive status message",
+        examples=["Rating 5 recorded. Score is well calibrated."],
+    )
 
 
 class EvaluationResponse(BaseModel):
@@ -105,16 +133,50 @@ class EvaluationResponse(BaseModel):
         }
     )
 
-    id: str = Field(..., description="UUID of this evaluation record", examples=["e1f2a3b4-5678-90ab-cdef-1234567890ab"])
-    run_id: str = Field(..., description="UUID of the associated pipeline run", examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"])
-    faithfulness: float | None = Field(None, description="Grounding score: are claims supported by retrieved context? (0-1)", examples=[0.96])
-    answer_relevance: float | None = Field(None, description="Relevance score: does the answer directly address the user query? (0-1)", examples=[0.94])
-    context_precision: float | None = Field(None, description="Precision score: proportion of relevant chunks in retrieved set (0-1)", examples=[0.89])
-    context_recall: float | None = Field(None, description="Recall score: coverage of required ground truth in context (0-1)", examples=[0.91])
-    overall_score: float | None = Field(None, description="Composite weighted evaluation quality score (0-1)", examples=[0.93])
-    judge_model: str | None = Field(None, description="LLM judge model used to evaluate this run", examples=["gpt-4o"])
-    user_rating: int | None = Field(None, description="Human calibration rating if submitted (1-5)", examples=[5])
-    calibration_needed: bool = Field(default=False, description="True if human rating diverges from judge by > 0.3", examples=[False])
+    id: str = Field(
+        ...,
+        description="UUID of this evaluation record",
+        examples=["e1f2a3b4-5678-90ab-cdef-1234567890ab"],
+    )
+    run_id: str = Field(
+        ...,
+        description="UUID of the associated pipeline run",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+    )
+    faithfulness: float | None = Field(
+        None,
+        description="Grounding score: are claims supported by retrieved context? (0-1)",
+        examples=[0.96],
+    )
+    answer_relevance: float | None = Field(
+        None,
+        description="Relevance score: does the answer directly address the user query? (0-1)",
+        examples=[0.94],
+    )
+    context_precision: float | None = Field(
+        None,
+        description="Precision score: proportion of relevant chunks in retrieved set (0-1)",
+        examples=[0.89],
+    )
+    context_recall: float | None = Field(
+        None,
+        description="Recall score: coverage of required ground truth in context (0-1)",
+        examples=[0.91],
+    )
+    overall_score: float | None = Field(
+        None, description="Composite weighted evaluation quality score (0-1)", examples=[0.93]
+    )
+    judge_model: str | None = Field(
+        None, description="LLM judge model used to evaluate this run", examples=["gpt-4o"]
+    )
+    user_rating: int | None = Field(
+        None, description="Human calibration rating if submitted (1-5)", examples=[5]
+    )
+    calibration_needed: bool = Field(
+        default=False,
+        description="True if human rating diverges from judge by > 0.3",
+        examples=[False],
+    )
 
 
 async def _resolve_pipeline_id(run_id: UUID, provided_pid: UUID | None) -> UUID:
@@ -156,7 +218,7 @@ async def patch_run_rating(
     run_id: UUID,
     payload: RatingRequest,
     req: Request,
-):
+) -> RatingResponse:
     """Record a human rating (1-5) and check if judge calibration is needed.
 
     Calibration is required when abs(overall_score - (rating / 5.0)) > 0.3.
@@ -254,7 +316,7 @@ async def patch_run_rating(
 async def get_run_evaluation(
     run_id: UUID,
     pipeline_id: UUID | None = Query(default=None),
-):
+) -> EvaluationResponse:
     """Retrieve the evaluation record for a pipeline run."""
     if pipeline_connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool is not available.")
@@ -306,7 +368,7 @@ async def get_run_evaluation(
     ),
     response_description="SSE stream of evaluation events.",
 )
-async def stream_evaluations(req: Request):
+async def stream_evaluations(req: Request) -> EventSourceResponse:
     """Server-Sent Events streaming newly persisted evaluation events from Redis pub/sub."""
     redis_client = getattr(req.app.state, "redis", None)
     if redis_client is None:
@@ -377,7 +439,7 @@ async def stream_evaluations(req: Request):
 async def list_evaluations(
     pipeline_id: UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
-):
+) -> list[dict[str, object]]:
     """Retrieve recent evaluation records with pipeline and run details for initial feed load."""
     if connection is None:
         raise HTTPException(status_code=503, detail="Database connection pool unavailable.")

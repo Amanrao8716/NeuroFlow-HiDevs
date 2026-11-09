@@ -14,7 +14,7 @@ def sanitize_text(value: str) -> str:
         import bleach
     except ImportError as exc:
         raise RuntimeError("Install backend requirements to sanitize text safely.") from exc
-    return bleach.clean(value, tags=[], strip=True)
+    return str(bleach.clean(value, tags=[], strip=True))
 
 
 def validate_public_url(url: str, *, resolve: bool = True) -> list[str]:
@@ -43,7 +43,7 @@ def validate_public_url(url: str, *, resolve: bool = True) -> list[str]:
         elif resolve:
             addresses = sorted(
                 {
-                    item[4][0]
+                    str(item[4][0])
                     for item in socket.getaddrinfo(
                         host,
                         port or (443 if parsed.scheme == "https" else 80),

@@ -1,9 +1,11 @@
 """Check and apply database schema migrations."""
 
+import logging
 from pathlib import Path
 
 from db.pool import get_pool
 
+logger = logging.getLogger("neuroflow.db.migrations")
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
@@ -24,7 +26,7 @@ async def apply_migrations() -> None:
                 async with conn.transaction():
                     await conn.execute(migration_file.read_text(encoding="utf-8"))
 
-            print("Database schema and RLS policies applied.")
+            logger.info("Database schema and RLS policies applied.")
 
         else:
             rls_enabled = await conn.fetchval(
@@ -52,7 +54,7 @@ async def apply_migrations() -> None:
                 async with conn.transaction():
                     await conn.execute(rls_file.read_text(encoding="utf-8"))
 
-                print("RLS policies applied.")
+                logger.info("RLS policies applied.")
 
         # Apply numbered migrations after the initial schema.
         # Existing databases can safely run migrations that are
@@ -67,4 +69,4 @@ async def apply_migrations() -> None:
             async with conn.transaction():
                 await conn.execute(migration_file.read_text(encoding="utf-8"))
 
-            print(f"Applied migration: {migration_file.name}")
+            logger.info("Applied migration: %s", migration_file.name)

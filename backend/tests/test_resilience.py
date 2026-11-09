@@ -954,7 +954,6 @@ class TestTimeoutManager:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-
 class TestHealthEndpoint:
     """Verify health status rules using TestClient with mocked dependencies."""
 

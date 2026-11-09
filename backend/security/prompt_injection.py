@@ -16,6 +16,7 @@ INJECTION_PATTERNS = [
     r"<\|system\|>",
 ]
 _COMPILED = [re.compile(pattern, re.IGNORECASE) for pattern in INJECTION_PATTERNS]
+
 logger = logging.getLogger("neuroflow.security.prompt_injection")
 
 
@@ -34,12 +35,12 @@ def detect_prompt_injection(text: str) -> DetectionResult:
     return DetectionResult(False)
 
 
-async def classify_query(client, query: str) -> bool:
+async def classify_query(client: object, query: str) -> bool:
     """One bounded, tool-free provider classification; errors propagate closed."""
     from providers.base import ChatMessage
     from providers.router import RoutingCriteria
 
-    result = await client.chat(
+    result = await client.chat(  # type: ignore[attr-defined]
         [
             ChatMessage(
                 role="system",
@@ -60,4 +61,4 @@ async def classify_query(client, query: str) -> bool:
     answer = result.content.strip().lower().strip(" .!\n")
     if answer not in {"yes", "no"}:
         raise ValueError("Security classifier returned an invalid decision.")
-    return answer == "yes"
+    return bool(answer == "yes")

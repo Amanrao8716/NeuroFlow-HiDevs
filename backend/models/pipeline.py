@@ -3,33 +3,33 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class ChunkingStrategy(str, Enum):
+class ChunkingStrategy(StrEnum):
     AUTO = "auto"
     FIXED = "fixed"
     SEMANTIC = "semantic"
     HIERARCHICAL = "hierarchical"
 
 
-class RerankerType(str, Enum):
+class RerankerType(StrEnum):
     CROSS_ENCODER = "cross-encoder"
     NONE = "none"
     LLM = "llm"
 
 
-class SystemPromptVariant(str, Enum):
+class SystemPromptVariant(StrEnum):
     DEFAULT = "default"
     CONCISE = "concise"
     DETAILED = "detailed"
     TECHNICAL = "technical"
 
 
-class ExtractorType(str, Enum):
+class ExtractorType(StrEnum):
     PDF = "pdf"
     DOCX = "docx"
     CSV = "csv"
@@ -226,7 +226,9 @@ class EvaluationConfig(BaseModel):
         default=0.8,
         ge=0.0,
         le=1.0,
-        description="Minimum overall evaluation score (0.0 - 1.0) required to promote run to training pairs",
+        description=(
+            "Minimum overall evaluation score (0.0 - 1.0) required to promote run to training pairs"
+        ),
     )
 
 
@@ -295,13 +297,35 @@ class PipelineCreateRequest(BaseModel):
         },
     )
 
-    name: str | None = Field(default=None, min_length=1, max_length=100, description="Unique pipeline name", examples=["customer-support-rag"])
-    description: str | None = Field(default=None, max_length=1000, description="Pipeline description and use case", examples=["Production pipeline for customer support"])
-    config: PipelineConfig | None = Field(default=None, description="Full nested pipeline configuration if provided as a single object")
-    ingestion: IngestionConfig | None = Field(default=None, description="Document parsing and chunking settings")
-    retrieval: RetrievalConfig | None = Field(default=None, description="Search, hybrid fusion, and reranking parameters")
-    generation: GenerationConfig | None = Field(default=None, description="LLM provider routing and prompt parameters")
-    evaluation: EvaluationConfig | None = Field(default=None, description="Judge evaluation and training curation settings")
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Unique pipeline name",
+        examples=["customer-support-rag"],
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=1000,
+        description="Pipeline description and use case",
+        examples=["Production pipeline for customer support"],
+    )
+    config: PipelineConfig | None = Field(
+        default=None,
+        description="Full nested pipeline configuration if provided as a single object",
+    )
+    ingestion: IngestionConfig | None = Field(
+        default=None, description="Document parsing and chunking settings"
+    )
+    retrieval: RetrievalConfig | None = Field(
+        default=None, description="Search, hybrid fusion, and reranking parameters"
+    )
+    generation: GenerationConfig | None = Field(
+        default=None, description="LLM provider routing and prompt parameters"
+    )
+    evaluation: EvaluationConfig | None = Field(
+        default=None, description="Judge evaluation and training curation settings"
+    )
 
     @model_validator(mode="after")
     def populate_from_config(self) -> PipelineCreateRequest:
@@ -332,12 +356,12 @@ class PipelineCreateRequest(BaseModel):
 
     def to_config(self) -> PipelineConfig:
         return PipelineConfig(
-            name=self.name,
+            name=self.name or "",
             description=self.description,
-            ingestion=self.ingestion,
-            retrieval=self.retrieval,
-            generation=self.generation,
-            evaluation=self.evaluation,
+            ingestion=self.ingestion or IngestionConfig(),
+            retrieval=self.retrieval or RetrievalConfig(),
+            generation=self.generation or GenerationConfig(),
+            evaluation=self.evaluation or EvaluationConfig(),
         )
 
 

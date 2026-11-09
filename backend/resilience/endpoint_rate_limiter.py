@@ -120,7 +120,7 @@ class SlidingWindowRateLimiter:
             ...
     """
 
-    def __init__(self, redis, *, limits: dict[str, RouteLimit] | None = None) -> None:
+    def __init__(self, redis: object, *, limits: dict[str, RouteLimit] | None = None) -> None:
         self._redis = redis
         self._limits = limits or ROUTE_LIMITS
         self._sha: str | None = None
@@ -198,12 +198,12 @@ class RateLimitMiddleware:
     initialises Redis).
     """
 
-    def __init__(self, app, limits: dict[str, RouteLimit] | None = None) -> None:
+    def __init__(self, app: object, limits: dict[str, RouteLimit] | None = None) -> None:
         self.app = app
         self._limits = limits or ROUTE_LIMITS
         self._limiters: dict[int, SlidingWindowRateLimiter] = {}
 
-    async def __call__(self, scope, receive, send) -> None:
+    async def __call__(self, scope: dict[str, object], receive: object, send: object) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return

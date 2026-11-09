@@ -2,6 +2,7 @@
 
 import logging
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import httpx
@@ -29,7 +30,7 @@ from resilience.circuit_breaker import CircuitBreakerRegistry
 from resilience.endpoint_rate_limiter import RateLimitMiddleware
 from resilience.timeout_manager import TimeoutManager
 
-from backend.security.auth import require_scope
+from backend.security.auth import ClientProfile, require_scope
 from backend.security.auth import router as auth_router
 from backend.security.middleware import SecurityHeadersMiddleware
 
@@ -45,12 +46,12 @@ tracer_provider = configure_tracing(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Initialize and clean up shared application resources."""
     await open_pool()
 
     try:
-        app.state.redis = redis.from_url(
+        app.state.redis = redis.from_url(  # type: ignore[no-untyped-call]
             settings.redis_url,
             decode_responses=True,
             socket_connect_timeout=3,
@@ -122,8 +123,13 @@ app.include_router(compare_router)
 app.include_router(finetune_router)
 
 
-@app.get("/", tags=["system"], summary="Service info", description="Returns service name and running status. Requires query scope.")
-async def root(_user=Depends(require_scope("query"))):
+@app.get(
+    "/",
+    tags=["system"],
+    summary="Service info",
+    description="Returns service name and running status. Requires query scope.",
+)
+async def root(_user: ClientProfile = Depends(require_scope("query"))) -> dict[str, str]:
     """Return basic service information."""
     return {
         "service": settings.app_name,
@@ -131,8 +137,16 @@ async def root(_user=Depends(require_scope("query"))):
     }
 
 
-@app.get("/health", tags=["system"], summary="Health check", description="Returns health status of Postgres, Redis, MLflow, circuit breakers, and ingestion queue. No authentication required.")
-async def health():
+@app.get(
+    "/health",
+    tags=["system"],
+    summary="Health check",
+    description=(
+        "Returns health status of Postgres, Redis, MLflow, circuit breakers, "
+        "and ingestion queue. No authentication required."
+    ),
+)
+async def health() -> JSONResponse:
     """
     Resilience-aware health check.
 
@@ -145,7 +159,7 @@ async def health():
         degraded  – any circuit breaker OPEN, or MLflow/optional dep unhealthy
         ok        – all required components healthy
     """
-    checks: dict = {}
+    checks: dict[str, object] = {}
     critical = False
     degraded = False
 
@@ -190,11 +204,12 @@ async def health():
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{settings.mlflow_tracking_uri.rstrip('/')}/health")
         mlflow_latency_ms = round((time.perf_counter() - t0) * 1000)
+        mlflow_status = "healthy" if response.status_code == 200 else "unhealthy"
         checks["mlflow"] = {
-            "status": ("healthy" if response.status_code == 200 else "unhealthy"),
+            "status": mlflow_status,
             "latency_ms": mlflow_latency_ms,
         }
-        if checks["mlflow"]["status"] != "healthy":
+        if mlflow_status != "healthy":
             degraded = True
     except httpx.HTTPError:
         mlflow_latency_ms = round((time.perf_counter() - t0) * 1000)
@@ -207,7 +222,7 @@ async def health():
 
     # ── Circuit Breakers ───────────────────────────────────────────────
     cb_registry = getattr(app.state, "circuit_breakers", None)
-    circuit_info: list[dict] = []
+    circuit_info: list[dict[str, object]] = []
     if cb_registry:
         for name, cb in cb_registry.all().items():
             try:
@@ -254,8 +269,14 @@ async def health():
     )
 
 
-@app.get("/metrics", response_class=PlainTextResponse, tags=["system"], summary="Prometheus metrics", description="Exposes Prometheus-format metrics for scraping. No authentication required.")
-async def metrics():
+@app.get(
+    "/metrics",
+    response_class=PlainTextResponse,
+    tags=["system"],
+    summary="Prometheus metrics",
+    description="Exposes Prometheus-format metrics for scraping. No authentication required.",
+)
+async def metrics() -> PlainTextResponse:
     """Expose Prometheus metrics."""
     redis_client = getattr(app.state, "redis", None)
     if redis_client is not None:

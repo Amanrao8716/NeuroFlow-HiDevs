@@ -36,7 +36,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from enum import Enum
+from enum import StrEnum
 
 from observability.metrics import (
     CIRCUIT_BREAKER_TRIPS,
@@ -46,7 +46,7 @@ from observability.metrics import (
 logger = logging.getLogger(__name__)
 
 
-class CircuitState(str, Enum):
+class CircuitState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
@@ -212,7 +212,7 @@ class CircuitBreaker:
 
     def __init__(
         self,
-        redis,
+        redis: object,
         name: str,
         *,
         failure_threshold: int = 5,
@@ -256,7 +256,7 @@ class CircuitBreaker:
         if self._sha_try_half_open is None:
             self._sha_try_half_open = await self._redis.script_load(_LUA_TRY_HALF_OPEN)
 
-    async def _run_script(self, sha: str, keys: list, args: list):
+    async def _run_script(self, sha: str, keys: list[object], args: list[object]) -> object:
         return await self._redis.evalsha(sha, len(keys), *keys, *args)
 
     # ------------------------------------------------------------------
@@ -316,7 +316,7 @@ class CircuitBreaker:
         async with self:
             yield
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> CircuitBreaker:
         await self._load_scripts()
         now = time.time()
 
@@ -354,7 +354,12 @@ class CircuitBreaker:
         self._current_state = state
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         if exc_type in (asyncio.CancelledError, GeneratorExit):
             # Cancellation is not a provider failure.  Release the half-open
             # slot if we had one, but do not modify the failure counter.
@@ -405,7 +410,7 @@ class CircuitBreakerRegistry:
     across the application.  Pass the Redis client once at startup.
     """
 
-    def __init__(self, redis) -> None:
+    def __init__(self, redis: object) -> None:
         self._redis = redis
         self._breakers: dict[str, CircuitBreaker] = {}
 

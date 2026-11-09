@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ WARN_THRESHOLD = 50  # warn above this
 ASSUMED_THROUGHPUT_PER_MINUTE: int = 2
 
 
-class QueueStatus(str, Enum):
+class QueueStatus(StrEnum):
     OK = "ok"
     WARNING = "warning"
     FULL = "full"
@@ -71,7 +71,7 @@ class BackpressureGuard:
 
     def __init__(
         self,
-        redis,
+        redis: object,
         *,
         high_threshold: int = HIGH_THRESHOLD,
         warn_threshold: int = WARN_THRESHOLD,

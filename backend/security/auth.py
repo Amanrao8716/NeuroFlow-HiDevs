@@ -9,7 +9,9 @@ import json
 import os
 import secrets
 import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from typing import Any
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -75,7 +77,7 @@ def _check_secret(secret: str, encoded: str) -> bool:
         return False
 
 
-def _client_registry() -> dict[str, dict]:
+def _client_registry() -> dict[str, dict[str, Any]]:
     raw = os.environ.get("NEUROFLOW_AUTH_CLIENTS", "{}")
     try:
         data = json.loads(raw)
@@ -137,7 +139,7 @@ async def get_current_user(
         raise _unauthorized() from exc
 
 
-def require_scope(scope: str):
+def require_scope(scope: str) -> Callable[[ClientProfile], Coroutine[Any, Any, ClientProfile]]:
     async def dependency(user: ClientProfile = Depends(get_current_user)) -> ClientProfile:
         if scope not in user.scopes and "admin" not in user.scopes:
             raise HTTPException(status_code=403, detail="Insufficient scope.")
@@ -172,5 +174,5 @@ async def authenticate_token(payload: TokenRequest) -> dict[str, str | int]:
     ),
     response_description="JWT access token, token type, and expires_in seconds.",
 )
-async def create_access_token(payload: TokenRequest):
+async def create_access_token(payload: TokenRequest) -> dict[str, str | int]:
     return await authenticate_token(payload)

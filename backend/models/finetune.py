@@ -31,7 +31,9 @@ class CreateFinetuneJobRequest(BaseModel):
     format: str = Field(
         default="sft",
         pattern="^(sft|dpo)$",
-        description="Training format: 'sft' (OpenAI JSONL) or 'dpo' (Direct Preference Optimization)",
+        description=(
+            "Training format: 'sft' (OpenAI JSONL) or 'dpo' (Direct Preference Optimization)"
+        ),
     )
 
 

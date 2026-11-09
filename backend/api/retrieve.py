@@ -86,11 +86,14 @@ class RetrievalRankingResponse(BaseModel):
     "/retrieve",
     response_model=RetrieveResponse,
     summary="Execute hybrid retrieval",
-    description="Run hybrid dense+sparse retrieval, RRF fusion, reranking, and context assembly. **Requires scope**: `query`",
+    description=(
+        "Run hybrid dense+sparse retrieval, RRF fusion, reranking, and context assembly. "
+        "**Requires scope**: `query`"
+    ),
     response_description="Retrieved chunks with scores, assembled context, and retrieval metadata.",
 )
-async def retrieve_endpoint(request: RetrieveRequest, req: Request):
-    """Execute hybrid retrieval, reciprocal rank fusion, optional reranking, and context assembly."""
+async def retrieve_endpoint(request: RetrieveRequest, req: Request) -> RetrieveResponse:
+    """Execute hybrid retrieval, reciprocal rank fusion, and context assembly."""
     try:
         # 1. Query Processing
         query_text = sanitize_text(request.query)
@@ -188,15 +191,18 @@ async def retrieve_endpoint(request: RetrieveRequest, req: Request):
 async def retrieval_rankings_for_test(
     request: RetrieveRequest,
     req: Request,
-    _admin=Depends(require_scope("admin")),
-):
+    _admin: object = Depends(require_scope("admin")),
+) -> RetrievalRankingResponse:
     """Return actual retrieval rankings only when an isolated test deployment opts in."""
     if os.getenv("NEUROFLOW_TEST_BENCHMARK_ENDPOINT") != "true":
         raise HTTPException(status_code=404, detail="Not found.")
     if os.getenv("HF_HUB_OFFLINE") != "1" or os.getenv("TRANSFORMERS_OFFLINE") != "1":
         raise HTTPException(
             status_code=503,
-            detail="Benchmark model loading must be offline; configure HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1.",
+            detail=(
+                "Benchmark model loading must be offline; "
+                "configure HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1."
+            ),
         )
 
     query_text = sanitize_text(request.query)

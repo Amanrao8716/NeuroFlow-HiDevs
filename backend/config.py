@@ -63,4 +63,4 @@ class Settings(BaseSettings):
         return f"redis://:{password}@{self.redis_host}:{self.redis_port}/0"
 
 
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]

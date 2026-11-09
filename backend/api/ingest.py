@@ -12,7 +12,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from config import settings
 from db.pool import pipeline_connection
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from resilience.backpressure import BackpressureGuard, QueueStatus
 
@@ -157,12 +157,13 @@ async def _enqueue(
 
 @router.post(
     "/ingest",
+    response_model=None,
     status_code=202,
     summary="Upload a file for ingestion",
     description=(
         "Upload a PDF, DOCX, image (JPG/PNG/WEBP), or CSV file for asynchronous processing. "
-        "The file is validated, deduplicated via SHA-256, then enqueued for chunking and embedding. "
-        "Poll GET /documents/{document_id} to track status.\n\n"
+        "The file is validated, deduplicated via SHA-256, then enqueued for chunking and "
+        "embedding. Poll GET /documents/{document_id} to track status.\n\n"
         "**Requires scope**: `ingest`"
     ),
     response_description="Document ID, queued status, and optional queue warning.",
@@ -171,8 +172,8 @@ async def ingest_file(
     request: Request,
     pipeline_id: UUID = Form(...),
     file: UploadFile = File(...),
-    _scope=Depends(require_scope("ingest")),
-):
+    _scope: object = Depends(require_scope("ingest")),
+) -> dict[str, object] | Response:
     """Accept a file, deduplicate it, and queue background processing."""
     filename = sanitize_text(Path(file.filename or "").name)
     filename, detected_filename_secrets = redact_secrets(filename)
@@ -301,6 +302,7 @@ async def ingest_file(
 
 @router.post(
     "/ingest/url",
+    response_model=None,
     status_code=202,
     summary="Submit a URL for ingestion",
     description=(
@@ -313,8 +315,8 @@ async def ingest_file(
 async def ingest_url(
     payload: URLIngestRequest,
     request: Request,
-    _scope=Depends(require_scope("ingest")),
-):
+    _scope: object = Depends(require_scope("ingest")),
+) -> dict[str, object] | Response:
     """Accept a URL and queue background processing."""
     normalized_url = str(payload.url)
     try:
@@ -421,15 +423,17 @@ async def ingest_url(
 @router.get(
     "/documents/{document_id}",
     summary="Get document status",
-    description="Retrieve processing status and chunk count for a document. **Requires scope**: `query`",
+    description=(
+        "Retrieve processing status and chunk count for a document. **Requires scope**: `query`"
+    ),
     response_description="Document metadata including filename, source_type, status, chunk_count.",
 )
 async def get_document(
     document_id: UUID,
     pipeline_id: UUID,
     request: Request,
-    _scope=Depends(require_scope("query")),
-):
+    _scope: object = Depends(require_scope("query")),
+) -> dict[str, object]:
     """Return document status and chunk count within its tenant."""
     del request  # Redis is not needed for status lookup.
 
@@ -465,15 +469,18 @@ async def get_document(
 @router.get(
     "/documents",
     summary="List documents",
-    description="Paginated list of documents for a pipeline, ordered by creation time descending. **Requires scope**: `query`",
+    description=(
+        "Paginated list of documents for a pipeline, ordered by creation time descending. "
+        "**Requires scope**: `query`"
+    ),
     response_description="Array of document summary objects.",
 )
 async def list_documents(
     pipeline_id: UUID,
     limit: int = 100,
     offset: int = 0,
-    _scope=Depends(require_scope("query")),
-):
+    _scope: object = Depends(require_scope("query")),
+) -> list[dict[str, object]]:
     """List documents for a given pipeline with status, chunk count, and metadata."""
     async with pipeline_connection(pipeline_id) as conn:
         rows = await conn.fetch(
@@ -510,15 +517,18 @@ async def list_documents(
 @router.get(
     "/documents/{document_id}/chunks",
     summary="List document chunks",
-    description="Retrieve all text chunks extracted from a document, ordered by chunk index. **Requires scope**: `query`",
+    description=(
+        "Retrieve all text chunks extracted from a document, ordered by chunk index. "
+        "**Requires scope**: `query`"
+    ),
     response_description="Ordered array of chunk objects with content and metadata.",
 )
 async def get_document_chunks(
     document_id: UUID,
     pipeline_id: UUID | None = None,
     limit: int = 100,
-    _scope=Depends(require_scope("query")),
-):
+    _scope: object = Depends(require_scope("query")),
+) -> list[dict[str, object]]:
     """Retrieve all chunks belonging to a document."""
     from db.pool import connection
 
@@ -528,7 +538,8 @@ async def get_document_chunks(
     async with connection() as conn:
         rows = await conn.fetch(
             """
-            SELECT c.id, c.document_id, c.content, c.chunk_index, c.token_count, c.metadata, c.created_at,
+            SELECT c.id, c.document_id, c.content, c.chunk_index,
+                   c.token_count, c.metadata, c.created_at,
                    d.filename, d.source_type
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
@@ -561,10 +572,16 @@ async def get_document_chunks(
 @router.get(
     "/chunks/{chunk_id}",
     summary="Get chunk detail",
-    description="Retrieve a single chunk by ID with content, metadata, and parent document details. **Requires scope**: `query`",
+    description=(
+        "Retrieve a single chunk by ID with content, metadata, and parent document details. "
+        "**Requires scope**: `query`"
+    ),
     response_description="Chunk object with content, token count, and parent document info.",
 )
-async def get_chunk(chunk_id: UUID, _scope=Depends(require_scope("query"))):
+async def get_chunk(
+    chunk_id: UUID,
+    _scope: object = Depends(require_scope("query")),
+) -> dict[str, object]:
     """Retrieve chunk details, content, and parent document metadata."""
     from db.pool import connection
 
@@ -574,7 +591,8 @@ async def get_chunk(chunk_id: UUID, _scope=Depends(require_scope("query"))):
     async with connection() as conn:
         row = await conn.fetchrow(
             """
-            SELECT c.id, c.document_id, c.content, c.chunk_index, c.token_count, c.metadata, c.created_at,
+            SELECT c.id, c.document_id, c.content, c.chunk_index,
+                   c.token_count, c.metadata, c.created_at,
                    d.filename, d.source_type, d.pipeline_id
             FROM chunks c
             JOIN documents d ON d.id = c.document_id

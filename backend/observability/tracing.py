@@ -37,6 +37,6 @@ def inject_trace_context() -> dict[str, str]:
     return carrier
 
 
-def extract_trace_context(carrier: dict[str, str] | None = None):
+def extract_trace_context(carrier: dict[str, str] | None = None) -> object:
     """Extract a W3C context received from a queue message."""
     return propagate.extract(carrier or {})
