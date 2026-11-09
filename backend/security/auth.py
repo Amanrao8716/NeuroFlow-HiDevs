@@ -14,12 +14,12 @@ from dataclasses import dataclass
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 JWT_ALGORITHM = "HS256"
 TOKEN_TTL_SECONDS = 3600
 bearer = HTTPBearer(auto_error=False)
-router = APIRouter(prefix="/auth", tags=["authentication"])
+router = APIRouter(prefix="/auth", tags=["Admin"])
 
 
 @dataclass(frozen=True)
@@ -29,8 +29,27 @@ class ClientProfile:
 
 
 class TokenRequest(BaseModel):
-    client_id: str = Field(min_length=1, max_length=128)
-    client_secret: str = Field(min_length=1, max_length=4096)
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "client_id": "service-client",
+                "client_secret": "secret-token-value",
+            }
+        }
+    )
+
+    client_id: str = Field(
+        min_length=1,
+        max_length=128,
+        description="Registered client identifier from NEUROFLOW_AUTH_CLIENTS.",
+        examples=["service-client"],
+    )
+    client_secret: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Client secret in plain text, verified against stored scrypt hash.",
+        examples=["secret-token-value"],
+    )
 
 
 def hash_client_secret(secret: str, *, salt: bytes | None = None) -> str:
@@ -144,6 +163,14 @@ async def authenticate_token(payload: TokenRequest) -> dict[str, str | int]:
     }
 
 
-@router.post("/token")
+@router.post(
+    "/token",
+    summary="Obtain access token",
+    description=(
+        "Exchange client credentials for a JWT bearer token valid for 3600 seconds. "
+        "Include the returned token in Authorization: Bearer header for all other endpoints."
+    ),
+    response_description="JWT access token, token type, and expires_in seconds.",
+)
 async def create_access_token(payload: TokenRequest):
     return await authenticate_token(payload)

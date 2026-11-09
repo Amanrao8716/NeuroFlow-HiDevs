@@ -23,7 +23,7 @@ from pipelines.retrieval import (
     reciprocal_rank_fusion,
 )
 
-router = APIRouter(tags=["retrieval"], dependencies=[Depends(require_scope("query"))])
+router = APIRouter(tags=["Query"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.retrieve")
 
 _processor = QueryProcessor()
@@ -82,7 +82,13 @@ class RetrievalRankingResponse(BaseModel):
     hybrid_reranked: list[str]
 
 
-@router.post("/retrieve", response_model=RetrieveResponse)
+@router.post(
+    "/retrieve",
+    response_model=RetrieveResponse,
+    summary="Execute hybrid retrieval",
+    description="Run hybrid dense+sparse retrieval, RRF fusion, reranking, and context assembly. **Requires scope**: `query`",
+    response_description="Retrieved chunks with scores, assembled context, and retrieval metadata.",
+)
 async def retrieve_endpoint(request: RetrieveRequest, req: Request):
     """Execute hybrid retrieval, reciprocal rank fusion, optional reranking, and context assembly."""
     try:

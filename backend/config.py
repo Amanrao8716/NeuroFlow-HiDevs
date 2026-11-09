@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     max_upload_size_bytes: int = Field(default=100 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
     embedding_cache_ttl_seconds: int = Field(default=1800, ge=0, le=86400)
     query_cache_ttl_seconds: int = Field(default=1800, ge=0, le=86400)
+    retention_run_days: int = Field(default=90, ge=1)
+    retention_eval_days: int = Field(default=180, ge=1)
+    enable_retention_scheduler: bool = Field(default=False)
 
     model_config = SettingsConfigDict(
         env_file=".env",

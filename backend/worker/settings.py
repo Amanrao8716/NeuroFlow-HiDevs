@@ -1,7 +1,9 @@
 """arq configuration for the NeuroFlow ingestion worker."""
 
 from arq.connections import RedisSettings
+from arq.cron import cron
 from config import settings
+from tasks.retention import retention_worker_task
 from worker.tasks import (
     evaluate_pipeline_run,
     poll_finetune_job,
@@ -14,7 +16,8 @@ from worker.tasks import (
 class WorkerSettings:
     """Configure background document processing, pipeline evaluation, and fine-tuning polling."""
 
-    functions = [process_document, evaluate_pipeline_run, poll_finetune_job]
+    functions = [process_document, evaluate_pipeline_run, poll_finetune_job, retention_worker_task]
+    cron_jobs = [cron(retention_worker_task, hour=2, minute=0)]
     on_startup = startup
     on_shutdown = shutdown
 

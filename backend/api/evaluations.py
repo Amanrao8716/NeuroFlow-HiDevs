@@ -10,7 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 
 try:
@@ -21,48 +21,100 @@ except ImportError:
 
 from backend.security.auth import require_scope
 
-router = APIRouter(tags=["evaluations"], dependencies=[Depends(require_scope("query"))])
+router = APIRouter(tags=["Evaluation"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.evaluations")
 
 
 class RatingRequest(BaseModel):
     """Payload for human rating submission."""
 
-    rating: int = Field(..., ge=1, le=5, description="Human evaluation rating from 1 to 5")
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "rating": 5,
+                "pipeline_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            }
+        }
+    )
+
+    rating: int = Field(
+        ...,
+        ge=1,
+        le=5,
+        description="Human evaluation rating from 1 to 5",
+        examples=[5],
+    )
     pipeline_id: UUID | None = Field(
-        default=None, description="Optional tenant pipeline ID for row-level security"
+        default=None,
+        description="Optional tenant pipeline ID for row-level security",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
     )
 
 
 class RatingResponse(BaseModel):
     """Response containing human rating, model overall score, and calibration requirement."""
 
-    run_id: str
-    user_rating: int
-    normalized_rating: float
-    overall_score: float | None
-    calibration_needed: bool
-    discrepancy: float | None
-    faithfulness: float | None = None
-    answer_relevance: float | None = None
-    context_precision: float | None = None
-    context_recall: float | None = None
-    message: str
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "run_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                "user_rating": 5,
+                "normalized_rating": 1.0,
+                "overall_score": 0.92,
+                "calibration_needed": False,
+                "discrepancy": 0.08,
+                "faithfulness": 0.95,
+                "answer_relevance": 0.90,
+                "context_precision": 0.88,
+                "context_recall": 0.92,
+                "message": "Rating 5 recorded. Score is well calibrated.",
+            }
+        }
+    )
+
+    run_id: str = Field(..., description="ID of the pipeline run rated", examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"])
+    user_rating: int = Field(..., description="Submitted human rating (1-5)", examples=[5])
+    normalized_rating: float = Field(..., description="Rating normalized to 0.0-1.0 scale", examples=[1.0])
+    overall_score: float | None = Field(None, description="Automated judge overall quality score", examples=[0.92])
+    calibration_needed: bool = Field(..., description="True when user rating diverges from judge score by > 0.3", examples=[False])
+    discrepancy: float | None = Field(None, description="Absolute difference between judge score and normalized rating", examples=[0.08])
+    faithfulness: float | None = Field(None, description="Judge faithfulness score (0-1)", examples=[0.95])
+    answer_relevance: float | None = Field(None, description="Judge answer relevance score (0-1)", examples=[0.90])
+    context_precision: float | None = Field(None, description="Judge context precision score (0-1)", examples=[0.88])
+    context_recall: float | None = Field(None, description="Judge context recall score (0-1)", examples=[0.92])
+    message: str = Field(..., description="Descriptive status message", examples=["Rating 5 recorded. Score is well calibrated."])
 
 
 class EvaluationResponse(BaseModel):
     """Full evaluation record for a pipeline run."""
 
-    id: str
-    run_id: str
-    faithfulness: float | None
-    answer_relevance: float | None
-    context_precision: float | None
-    context_recall: float | None
-    overall_score: float | None
-    judge_model: str | None
-    user_rating: int | None
-    calibration_needed: bool = False
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "e1f2a3b4-5678-90ab-cdef-1234567890ab",
+                "run_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                "faithfulness": 0.96,
+                "answer_relevance": 0.94,
+                "context_precision": 0.89,
+                "context_recall": 0.91,
+                "overall_score": 0.93,
+                "judge_model": "gpt-4o",
+                "user_rating": 5,
+                "calibration_needed": False,
+            }
+        }
+    )
+
+    id: str = Field(..., description="UUID of this evaluation record", examples=["e1f2a3b4-5678-90ab-cdef-1234567890ab"])
+    run_id: str = Field(..., description="UUID of the associated pipeline run", examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"])
+    faithfulness: float | None = Field(None, description="Grounding score: are claims supported by retrieved context? (0-1)", examples=[0.96])
+    answer_relevance: float | None = Field(None, description="Relevance score: does the answer directly address the user query? (0-1)", examples=[0.94])
+    context_precision: float | None = Field(None, description="Precision score: proportion of relevant chunks in retrieved set (0-1)", examples=[0.89])
+    context_recall: float | None = Field(None, description="Recall score: coverage of required ground truth in context (0-1)", examples=[0.91])
+    overall_score: float | None = Field(None, description="Composite weighted evaluation quality score (0-1)", examples=[0.93])
+    judge_model: str | None = Field(None, description="LLM judge model used to evaluate this run", examples=["gpt-4o"])
+    user_rating: int | None = Field(None, description="Human calibration rating if submitted (1-5)", examples=[5])
+    calibration_needed: bool = Field(default=False, description="True if human rating diverges from judge by > 0.3", examples=[False])
 
 
 async def _resolve_pipeline_id(run_id: UUID, provided_pid: UUID | None) -> UUID:
@@ -89,7 +141,17 @@ async def _resolve_pipeline_id(run_id: UUID, provided_pid: UUID | None) -> UUID:
         return row["pipeline_id"]
 
 
-@router.patch("/runs/{run_id}/rating", response_model=RatingResponse)
+@router.patch(
+    "/runs/{run_id}/rating",
+    response_model=RatingResponse,
+    summary="Submit human rating",
+    description=(
+        "Record a 1-5 human rating for a pipeline run. "
+        "Checks calibration against LLM judge score.\n\n"
+        "**Requires scope**: `query`"
+    ),
+    response_description="Rating, normalized score, discrepancy, and calibration recommendation.",
+)
 async def patch_run_rating(
     run_id: UUID,
     payload: RatingRequest,
@@ -179,7 +241,16 @@ async def patch_run_rating(
     )
 
 
-@router.get("/runs/{run_id}/evaluation", response_model=EvaluationResponse)
+@router.get(
+    "/runs/{run_id}/evaluation",
+    response_model=EvaluationResponse,
+    summary="Get run evaluation",
+    description=(
+        "Retrieve LLM-as-a-judge evaluation scores for a pipeline run.\n\n"
+        "**Requires scope**: `query`"
+    ),
+    response_description="Evaluation scores, judge model, user rating, and calibration flag.",
+)
 async def get_run_evaluation(
     run_id: UUID,
     pipeline_id: UUID | None = Query(default=None),
@@ -226,7 +297,15 @@ async def get_run_evaluation(
         )
 
 
-@router.get("/evaluations/stream")
+@router.get(
+    "/evaluations/stream",
+    summary="Stream live evaluation events",
+    description=(
+        "Subscribe to SSE for newly completed evaluations via Redis pub/sub.\n\n"
+        "**Requires scope**: `query`"
+    ),
+    response_description="SSE stream of evaluation events.",
+)
 async def stream_evaluations(req: Request):
     """Server-Sent Events streaming newly persisted evaluation events from Redis pub/sub."""
     redis_client = getattr(req.app.state, "redis", None)
@@ -286,7 +365,15 @@ async def stream_evaluations(req: Request):
     )
 
 
-@router.get("/evaluations")
+@router.get(
+    "/evaluations",
+    summary="List evaluations",
+    description=(
+        "Recent evaluation records with pipeline name, run query, and LLM judge scores.\n\n"
+        "**Requires scope**: `query`"
+    ),
+    response_description="Array of evaluation records ordered by evaluated_at descending.",
+)
 async def list_evaluations(
     pipeline_id: UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),

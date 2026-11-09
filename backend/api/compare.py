@@ -30,7 +30,7 @@ from backend.security.prompt_injection import classify_query, detect_prompt_inje
 from backend.security.secrets import redact_secrets
 from backend.security.validators import sanitize_text
 
-router = APIRouter(tags=["compare"], dependencies=[Depends(require_scope("query"))])
+router = APIRouter(tags=["Query"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.compare")
 
 _pipeline_instance: GenerationPipeline | None = None
@@ -227,6 +227,12 @@ async def _execute_single_pipeline(
     "/pipelines/compare",
     response_model=ComparePipelinesResponse,
     summary="Compare two RAG pipelines side-by-side concurrently",
+    description=(
+        "Execute the same query against two pipelines concurrently and return "
+        "side-by-side results for A/B testing.\n\n"
+        "**Requires scope**: `query`"
+    ),
+    response_description="Side-by-side comparison results for pipeline A and B.",
 )
 async def compare_pipelines(
     payload: ComparePipelinesRequest,

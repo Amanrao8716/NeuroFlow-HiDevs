@@ -13,14 +13,14 @@ from arq.connections import RedisSettings
 from config import settings
 from db.pool import pipeline_connection
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from resilience.backpressure import BackpressureGuard, QueueStatus
 
 from backend.security.auth import get_current_user, require_scope
 from backend.security.secrets import redact_secrets
 from backend.security.validators import sanitize_text, validate_public_url
 
-router = APIRouter(tags=["ingestion"], dependencies=[Depends(get_current_user)])
+router = APIRouter(tags=["Ingestion"], dependencies=[Depends(get_current_user)])
 logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = settings.max_upload_size_bytes
@@ -101,8 +101,25 @@ def _validate_document(content_type: str | None, extension: str, data: bytes) ->
 class URLIngestRequest(BaseModel):
     """URL ingestion request payload."""
 
-    url: HttpUrl
-    pipeline_id: UUID
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "url": "https://docs.neuroflow.io/guides/architecture.html",
+                "pipeline_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            }
+        }
+    )
+
+    url: HttpUrl = Field(
+        ...,
+        description="Publicly reachable URL to fetch and ingest.",
+        examples=["https://docs.neuroflow.io/guides/architecture.html"],
+    )
+    pipeline_id: UUID = Field(
+        ...,
+        description="Pipeline (tenant) ID that owns this document.",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+    )
 
 
 async def _enqueue(
@@ -138,7 +155,18 @@ async def _enqueue(
         await pool.aclose()
 
 
-@router.post("/ingest", status_code=202)
+@router.post(
+    "/ingest",
+    status_code=202,
+    summary="Upload a file for ingestion",
+    description=(
+        "Upload a PDF, DOCX, image (JPG/PNG/WEBP), or CSV file for asynchronous processing. "
+        "The file is validated, deduplicated via SHA-256, then enqueued for chunking and embedding. "
+        "Poll GET /documents/{document_id} to track status.\n\n"
+        "**Requires scope**: `ingest`"
+    ),
+    response_description="Document ID, queued status, and optional queue warning.",
+)
 async def ingest_file(
     request: Request,
     pipeline_id: UUID = Form(...),
@@ -271,7 +299,17 @@ async def ingest_file(
     return response_body
 
 
-@router.post("/ingest/url", status_code=202)
+@router.post(
+    "/ingest/url",
+    status_code=202,
+    summary="Submit a URL for ingestion",
+    description=(
+        "Submit a public URL for asynchronous web scraping and ingestion. "
+        "Deduplicated via URL hash, then enqueued for extraction.\n\n"
+        "**Requires scope**: `ingest`"
+    ),
+    response_description="Document ID, queued status, and optional queue warning.",
+)
 async def ingest_url(
     payload: URLIngestRequest,
     request: Request,
@@ -380,7 +418,12 @@ async def ingest_url(
     return response_body
 
 
-@router.get("/documents/{document_id}")
+@router.get(
+    "/documents/{document_id}",
+    summary="Get document status",
+    description="Retrieve processing status and chunk count for a document. **Requires scope**: `query`",
+    response_description="Document metadata including filename, source_type, status, chunk_count.",
+)
 async def get_document(
     document_id: UUID,
     pipeline_id: UUID,
@@ -419,7 +462,12 @@ async def get_document(
     }
 
 
-@router.get("/documents")
+@router.get(
+    "/documents",
+    summary="List documents",
+    description="Paginated list of documents for a pipeline, ordered by creation time descending. **Requires scope**: `query`",
+    response_description="Array of document summary objects.",
+)
 async def list_documents(
     pipeline_id: UUID,
     limit: int = 100,
@@ -459,7 +507,12 @@ async def list_documents(
     ]
 
 
-@router.get("/documents/{document_id}/chunks")
+@router.get(
+    "/documents/{document_id}/chunks",
+    summary="List document chunks",
+    description="Retrieve all text chunks extracted from a document, ordered by chunk index. **Requires scope**: `query`",
+    response_description="Ordered array of chunk objects with content and metadata.",
+)
 async def get_document_chunks(
     document_id: UUID,
     pipeline_id: UUID | None = None,
@@ -505,7 +558,12 @@ async def get_document_chunks(
     ]
 
 
-@router.get("/chunks/{chunk_id}")
+@router.get(
+    "/chunks/{chunk_id}",
+    summary="Get chunk detail",
+    description="Retrieve a single chunk by ID with content, metadata, and parent document details. **Requires scope**: `query`",
+    response_description="Chunk object with content, token count, and parent document info.",
+)
 async def get_chunk(chunk_id: UUID, _scope=Depends(require_scope("query"))):
     """Retrieve chunk details, content, and parent document metadata."""
     from db.pool import connection

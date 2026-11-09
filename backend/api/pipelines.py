@@ -39,7 +39,7 @@ from backend.security.auth import get_current_user, require_scope
 from backend.security.validators import sanitize_text
 
 router = APIRouter(
-    prefix="/pipelines", tags=["pipelines"], dependencies=[Depends(get_current_user)]
+    prefix="/pipelines", tags=["Admin"], dependencies=[Depends(get_current_user)]
 )
 logger = logging.getLogger("neuroflow.api.pipelines")
 
@@ -119,7 +119,18 @@ def deep_merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]
     return result
 
 
-@router.post("", response_model=PipelineResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=PipelineResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create pipeline",
+    description=(
+        "Create a new RAG pipeline configuration. Names must be unique. "
+        "Creates version 1 automatically.\n\n"
+        "**Requires scope**: `admin`"
+    ),
+    response_description="Created pipeline with assigned ID, version 1, and full configuration.",
+)
 async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require_scope("admin"))):
     """Validate and create a new RAG pipeline, establishing version 1."""
     payload.name = sanitize_text(payload.name).strip()
@@ -186,7 +197,13 @@ async def create_pipeline(payload: PipelineCreateRequest, _admin=Depends(require
     )
 
 
-@router.get("", response_model=list[PipelineResponse])
+@router.get(
+    "",
+    response_model=list[PipelineResponse],
+    summary="List pipelines",
+    description="Return all active pipelines with current version and run statistics. **Requires scope**: `query`",
+    response_description="Array of pipeline objects with config and run_count.",
+)
 async def list_pipelines(
     include_archived: bool = Query(default=False), _scope=Depends(require_scope("query"))
 ):
@@ -233,7 +250,13 @@ async def list_pipelines(
     return results
 
 
-@router.get("/{pipeline_id}", response_model=PipelineResponse)
+@router.get(
+    "/{pipeline_id}",
+    response_model=PipelineResponse,
+    summary="Get pipeline",
+    description="Retrieve a pipeline by ID including aggregate evaluation metrics. **Requires scope**: `query`",
+    response_description="Full pipeline details including aggregate evaluation scores.",
+)
 async def get_pipeline(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
     """Retrieve full pipeline configuration, current version, and aggregate evaluation scores."""
     if connection is None:
@@ -305,7 +328,17 @@ async def get_pipeline(pipeline_id: UUID, _scope=Depends(require_scope("query"))
         )
 
 
-@router.patch("/{pipeline_id}", response_model=PipelineResponse)
+@router.patch(
+    "/{pipeline_id}",
+    response_model=PipelineResponse,
+    summary="Update pipeline configuration",
+    description=(
+        "Merge partial config updates into existing pipeline. "
+        "Creates a new immutable version on each update.\n\n"
+        "**Requires scope**: `admin`"
+    ),
+    response_description="Updated pipeline at the new version.",
+)
 async def update_pipeline(
     pipeline_id: UUID, payload: PipelineUpdateRequest, _admin=Depends(require_scope("admin"))
 ):
@@ -426,7 +459,12 @@ async def update_pipeline(
         )
 
 
-@router.delete("/{pipeline_id}")
+@router.delete(
+    "/{pipeline_id}",
+    summary="Archive pipeline",
+    description="Soft-delete pipeline by setting status to archived. Preserves all historical data. **Requires scope**: `admin`",
+    response_description="Confirmation of pipeline archival with pipeline ID and new status.",
+)
 async def delete_pipeline(pipeline_id: UUID, _admin=Depends(require_scope("admin"))):
     """Soft-delete pipeline by archiving status. Preserves all runs and historical versions."""
     if connection is None:
@@ -452,7 +490,13 @@ async def delete_pipeline(pipeline_id: UUID, _admin=Depends(require_scope("admin
     return {"id": str(pipeline_id), "status": "archived"}
 
 
-@router.get("/{pipeline_id}/runs", response_model=PaginatedRunsResponse)
+@router.get(
+    "/{pipeline_id}/runs",
+    response_model=PaginatedRunsResponse,
+    summary="List pipeline runs",
+    description="Paginated query execution history with latency, token counts, cost, and evaluation scores. **Requires scope**: `query`",
+    response_description="Paginated run items with metrics and evaluation scores.",
+)
 async def get_pipeline_runs(
     pipeline_id: UUID,
     page: int = Query(default=1, ge=1, description="Page number"),
@@ -536,7 +580,13 @@ async def get_pipeline_runs(
         )
 
 
-@router.get("/{pipeline_id}/analytics", response_model=AnalyticsResponse)
+@router.get(
+    "/{pipeline_id}/analytics",
+    response_model=AnalyticsResponse,
+    summary="Pipeline analytics",
+    description="Compute latency percentiles, evaluation averages, cost per query, and 30-day trends. **Requires scope**: `query`",
+    response_description="Analytics including latency percentiles, cost, and time-series data.",
+)
 async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
     """Compute latency percentiles, evaluation aggregates, cost, and 30-day query trends."""
     if connection is None:
@@ -724,7 +774,13 @@ async def get_pipeline_analytics(pipeline_id: UUID, _scope=Depends(require_scope
         )
 
 
-@router.get("/{pipeline_id}/suggestions", response_model=SuggestionsResponse)
+@router.get(
+    "/{pipeline_id}/suggestions",
+    response_model=SuggestionsResponse,
+    summary="Get optimization suggestions",
+    description="Analyze recent evaluations and return rule-based advisory improvement suggestions. **Requires scope**: `query`",
+    response_description="List of prioritized improvement suggestions with proposed config changes.",
+)
 async def get_pipeline_suggestions(pipeline_id: UUID, _scope=Depends(require_scope("query"))):
     """Analyze recent evaluation metrics and return advisory rule-based optimization suggestions."""
     if connection is None:

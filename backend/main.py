@@ -87,9 +87,16 @@ app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
     lifespan=lifespan,
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    description=(
+        "NeuroFlow is a production-grade Retrieval-Augmented Generation (RAG) API. "
+        "Ingest documents, run hybrid search queries, evaluate generation quality, "
+        "and manage pipeline configurations."
+    ),
+    contact={"name": "NeuroFlow Team"},
+    license_info={"name": "Proprietary"},
 )
 
 app.add_middleware(
@@ -115,7 +122,7 @@ app.include_router(compare_router)
 app.include_router(finetune_router)
 
 
-@app.get("/")
+@app.get("/", tags=["system"], summary="Service info", description="Returns service name and running status. Requires query scope.")
 async def root(_user=Depends(require_scope("query"))):
     """Return basic service information."""
     return {
@@ -124,7 +131,7 @@ async def root(_user=Depends(require_scope("query"))):
     }
 
 
-@app.get("/health")
+@app.get("/health", tags=["system"], summary="Health check", description="Returns health status of Postgres, Redis, MLflow, circuit breakers, and ingestion queue. No authentication required.")
 async def health():
     """
     Resilience-aware health check.
@@ -247,7 +254,7 @@ async def health():
     )
 
 
-@app.get("/metrics", response_class=PlainTextResponse)
+@app.get("/metrics", response_class=PlainTextResponse, tags=["system"], summary="Prometheus metrics", description="Exposes Prometheus-format metrics for scraping. No authentication required.")
 async def metrics():
     """Expose Prometheus metrics."""
     redis_client = getattr(app.state, "redis", None)

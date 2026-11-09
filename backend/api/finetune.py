@@ -26,7 +26,7 @@ logger = logging.getLogger("neuroflow.api.finetune")
 from backend.security.auth import require_scope
 
 router = APIRouter(
-    prefix="/finetune", tags=["finetuning"], dependencies=[Depends(require_scope("admin"))]
+    prefix="/finetune", tags=["Fine-Tuning"], dependencies=[Depends(require_scope("admin"))]
 )
 
 
@@ -37,7 +37,14 @@ def _format_mlflow_url(run_id: str | None) -> str | None:
     return f"{base_uri}/#/experiments/0/runs/{run_id}"
 
 
-@router.post("/jobs", response_model=FinetuneJobResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/jobs",
+    response_model=FinetuneJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Submit fine-tuning job",
+    description="Extract training pairs, validate, track in MLflow, and submit to provider. **Requires scope**: `admin`",
+    response_description="Fine-tuning job record with provider job ID and MLflow run URL.",
+)
 async def create_finetune_job(payload: CreateFinetuneJobRequest):
     """Trigger training data extraction, validation, MLflow tracking setup, and asynchronous fine-tuning job submission."""
     manager = FinetuneJobManager()
@@ -102,7 +109,13 @@ async def create_finetune_job(payload: CreateFinetuneJobRequest):
     )
 
 
-@router.get("/jobs", response_model=FinetuneJobListResponse)
+@router.get(
+    "/jobs",
+    response_model=FinetuneJobListResponse,
+    summary="List fine-tuning jobs",
+    description="List fine-tuning jobs ordered by creation time. Filter by pipeline_id. **Requires scope**: `admin`",
+    response_description="List of fine-tuning job summaries.",
+)
 async def list_finetune_jobs(
     pipeline_id: UUID | None = Query(default=None, description="Optional pipeline ID filter"),
     limit: int = Query(default=50, ge=1, le=100),
@@ -156,7 +169,13 @@ async def list_finetune_jobs(
     return FinetuneJobListResponse(jobs=jobs, total=total)
 
 
-@router.get("/jobs/{job_id}", response_model=FinetuneJobResponse)
+@router.get(
+    "/jobs/{job_id}",
+    response_model=FinetuneJobResponse,
+    summary="Get fine-tuning job detail",
+    description="Full job status including training metrics, extraction report, and MLflow run URL. **Requires scope**: `admin`",
+    response_description="Full fine-tuning job record with metrics and status.",
+)
 async def get_finetune_job_detail(job_id: UUID):
     """Get detailed status including training metrics, extraction summary, provider model ID, and MLflow run URL."""
     async with connection() as conn:
@@ -202,7 +221,13 @@ async def get_finetune_job_detail(job_id: UUID):
     )
 
 
-@router.get("/training-data/preview", response_model=TrainingDataPreviewResponse)
+@router.get(
+    "/training-data/preview",
+    response_model=TrainingDataPreviewResponse,
+    summary="Preview training data",
+    description="Preview eligible training pairs without creating a job. **Requires scope**: `admin`",
+    response_description="Sample training pairs with quality scores and eligibility count.",
+)
 async def preview_training_data(
     pipeline_id: UUID | None = Query(default=None, description="Optional pipeline ID filter"),
     min_quality_score: float = Query(default=0.82, ge=0.0, le=1.0),

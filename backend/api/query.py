@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from observability.metrics import QUERY_LATENCY, QUERY_TOTAL
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 
 from backend.security.auth import require_scope
@@ -22,7 +22,7 @@ from backend.security.secrets import redact_secrets
 from backend.security.validators import sanitize_text
 from pipelines.generation.generator import GenerationPipeline, GenerationResult
 
-router = APIRouter(tags=["generation"], dependencies=[Depends(require_scope("query"))])
+router = APIRouter(tags=["Query"], dependencies=[Depends(require_scope("query"))])
 logger = logging.getLogger("neuroflow.api.query")
 
 _pipeline_instance: GenerationPipeline | None = None
@@ -57,62 +57,188 @@ def get_generation_pipeline(request: Request | None = None) -> GenerationPipelin
 class QueryRequest(BaseModel):
     """Request model for POST /query endpoint."""
 
-    query: str = Field(..., min_length=1, max_length=5000, description="User search query")
-    pipeline_id: UUID = Field(..., description="Tenant pipeline ID for data isolation")
-    stream: bool = Field(default=False, description="Whether to stream response tokens via SSE")
-    top_k: int = Field(default=10, ge=1, le=50, description="Top K retrieval candidates")
-    max_context_tokens: int = Field(
-        default=4000, ge=100, le=20000, description="Token budget for context"
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "query": "How does reciprocal rank fusion merge dense and sparse results?",
+                "pipeline_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                "stream": False,
+                "top_k": 10,
+                "max_context_tokens": 4000,
+                "rerank": True,
+                "pipeline_version": 1,
+            }
+        }
     )
-    rerank: bool = Field(default=True, description="Whether to apply reranking")
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=5000,
+        description="User search query",
+        examples=["How does reciprocal rank fusion merge dense and sparse results?"],
+    )
+    pipeline_id: UUID = Field(
+        ...,
+        description="Tenant pipeline ID for data isolation",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+    )
+    stream: bool = Field(
+        default=False,
+        description="Whether to stream response tokens via SSE",
+        examples=[False],
+    )
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Top K retrieval candidates",
+        examples=[10],
+    )
+    max_context_tokens: int = Field(
+        default=4000,
+        ge=100,
+        le=20000,
+        description="Token budget for context",
+        examples=[4000],
+    )
+    rerank: bool = Field(
+        default=True,
+        description="Whether to apply reranking",
+        examples=[True],
+    )
     pipeline_version: int | None = Field(
-        default=None, ge=1, description="Specific pipeline version to execute"
+        default=None,
+        ge=1,
+        description="Specific pipeline version to execute",
+        examples=[1],
     )
 
 
 class CitationItem(BaseModel):
     """Structured citation returned to API client."""
 
-    reference: str
-    source_number: int
-    chunk_id: str | None
-    document_name: str | None
-    page_number: int | None
-    content_preview: str | None
-    is_valid: bool
-    error: str | None = None
+    reference: str = Field(
+        ...,
+        description="Raw citation reference string from the generated answer",
+        examples=["[1]"],
+    )
+    source_number: int = Field(
+        ...,
+        description="Sequential citation number, 1-based",
+        examples=[1],
+    )
+    chunk_id: str | None = Field(
+        None,
+        description="UUID of the retrieved chunk backing this citation",
+        examples=["a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"],
+    )
+    document_name: str | None = Field(
+        None,
+        description="Filename of the source document",
+        examples=["rag_architecture.pdf"],
+    )
+    page_number: int | None = Field(
+        None,
+        description="Page number in the source document, if available",
+        examples=[4],
+    )
+    content_preview: str | None = Field(
+        None,
+        description="Short excerpt from the source chunk",
+        examples=["Reciprocal rank fusion assigns weighted scores..."],
+    )
+    is_valid: bool = Field(
+        ...,
+        description="Whether the citation resolves to a real retrieved chunk",
+        examples=[True],
+    )
+    error: str | None = Field(
+        None,
+        description="Validation error if citation is invalid",
+        examples=[None],
+    )
 
 
 class QueryResponse(BaseModel):
     """Synchronous JSON response for POST /query (stream=false)."""
 
-    run_id: str
-    query: str
-    query_type: str
-    answer: str
-    citations: list[CitationItem]
-    sources: list[dict[str, Any]]
-    chunks_used: int
-    input_tokens: int
-    output_tokens: int
-    latency_ms: int
-    model_used: str
-    status: str
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "run_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                "query": "How does RRF work?",
+                "query_type": "technical",
+                "answer": "RRF combines ranks from multiple retrievers using reciprocal rank scoring [1].",
+                "citations": [
+                    {
+                        "reference": "[1]",
+                        "source_number": 1,
+                        "chunk_id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+                        "document_name": "rag_architecture.pdf",
+                        "page_number": 4,
+                        "content_preview": "Reciprocal rank fusion assigns weighted scores...",
+                        "is_valid": True,
+                        "error": None,
+                    }
+                ],
+                "sources": [],
+                "chunks_used": 1,
+                "input_tokens": 350,
+                "output_tokens": 45,
+                "latency_ms": 420,
+                "model_used": "gpt-4o-mini",
+                "status": "completed",
+            }
+        }
+    )
+
+    run_id: str = Field(..., description="Unique ID for this query pipeline run", examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"])
+    query: str = Field(..., description="Original user query", examples=["How does RRF work?"])
+    query_type: str = Field(..., description="Classified intent (e.g. technical, factual, comparison)", examples=["technical"])
+    answer: str = Field(..., description="Generated answer with reference markers", examples=["RRF combines ranks..."])
+    citations: list[CitationItem] = Field(default_factory=list, description="Extracted and verified citations")
+    sources: list[dict[str, Any]] = Field(default_factory=list, description="Retrieved source chunks metadata")
+    chunks_used: int = Field(..., description="Count of retrieved chunks assembled into context", examples=[1])
+    input_tokens: int = Field(..., description="Prompt token count", examples=[350])
+    output_tokens: int = Field(..., description="Completion token count", examples=[45])
+    latency_ms: int = Field(..., description="Total execution latency in milliseconds", examples=[420])
+    model_used: str = Field(..., description="Model identifier used for generation", examples=["gpt-4o-mini"])
+    status: str = Field(..., description="Execution status ('completed' or 'failed')", examples=["completed"])
 
 
 class StreamInitResponse(BaseModel):
     """Response returned when stream=true, pointing to the SSE stream URL."""
 
-    run_id: str
-    stream_url: str
-    status: str = "running"
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "run_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                "stream_url": "/query/3fa85f64-5717-4562-b3fc-2c963f66afa6/stream",
+                "status": "running",
+            }
+        }
+    )
+
+    run_id: str = Field(..., description="UUID assigned to this streaming execution run", examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"])
+    stream_url: str = Field(..., description="Relative URL to subscribe for Server-Sent Events", examples=["/query/3fa85f64-5717-4562-b3fc-2c963f66afa6/stream"])
+    status: str = Field(default="running", description="Initial streaming status", examples=["running"])
 
 
 # In-memory registry fallback for streaming tasks (backed by Redis when available)
 _active_streams: dict[str, dict[str, Any]] = {}
 
 
-@router.post("/query")
+@router.post(
+    "/query",
+    summary="Execute RAG query",
+    description=(
+        "Run a full retrieval-augmented generation pipeline. "
+        "Set stream=false (default) for JSON response, stream=true for SSE.\n\n"
+        "**Requires scope**: `query`"
+    ),
+    response_description="QueryResponse (stream=false) or StreamInitResponse (stream=true).",
+)
 async def post_query(request: QueryRequest, req: Request):
     """Execute RAG generation pipeline.
 
@@ -198,7 +324,15 @@ async def post_query(request: QueryRequest, req: Request):
     )
 
 
-@router.get("/query/{run_id}/stream")
+@router.get(
+    "/query/{run_id}/stream",
+    summary="Stream query results via SSE",
+    description=(
+        "Connect after POST /query with stream=true. Returns text/event-stream of generation events.\n\n"
+        "**Requires scope**: `query`"
+    ),
+    response_description="SSE stream of generation events.",
+)
 async def get_query_stream(run_id: UUID, req: Request):
     """Server-Sent Events endpoint streaming retrieval and token events."""
     run_id_str = str(run_id)

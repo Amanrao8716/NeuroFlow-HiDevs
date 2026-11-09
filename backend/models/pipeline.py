@@ -270,15 +270,38 @@ class PipelineConfig(BaseModel):
 class PipelineCreateRequest(BaseModel):
     """Request payload for POST /pipelines."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "name": "customer-support-rag",
+                "description": "Production pipeline for customer support query answering",
+                "ingestion": {
+                    "chunking_strategy": "auto",
+                    "chunk_size_tokens": 512,
+                    "chunk_overlap_tokens": 50,
+                },
+                "retrieval": {
+                    "dense_k": 20,
+                    "sparse_k": 15,
+                    "rrf_k": 60,
+                    "top_k_after_rerank": 8,
+                },
+                "generation": {
+                    "model_routing": "gpt-4o-mini",
+                    "temperature": 0.7,
+                },
+            }
+        },
+    )
 
-    name: str | None = Field(default=None, min_length=1, max_length=100)
-    description: str | None = Field(default=None, max_length=1000)
-    config: PipelineConfig | None = None
-    ingestion: IngestionConfig | None = None
-    retrieval: RetrievalConfig | None = None
-    generation: GenerationConfig | None = None
-    evaluation: EvaluationConfig | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=100, description="Unique pipeline name", examples=["customer-support-rag"])
+    description: str | None = Field(default=None, max_length=1000, description="Pipeline description and use case", examples=["Production pipeline for customer support"])
+    config: PipelineConfig | None = Field(default=None, description="Full nested pipeline configuration if provided as a single object")
+    ingestion: IngestionConfig | None = Field(default=None, description="Document parsing and chunking settings")
+    retrieval: RetrievalConfig | None = Field(default=None, description="Search, hybrid fusion, and reranking parameters")
+    generation: GenerationConfig | None = Field(default=None, description="LLM provider routing and prompt parameters")
+    evaluation: EvaluationConfig | None = Field(default=None, description="Judge evaluation and training curation settings")
 
     @model_validator(mode="after")
     def populate_from_config(self) -> PipelineCreateRequest:
