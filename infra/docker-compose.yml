@@ -1,0 +1,161 @@
+﻿services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: neuroflow
+      POSTGRES_USER: ${POSTGRES_USER:-neuroflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-neuroflow} -d neuroflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: >
+      sh -c 'exec redis-server
+      --requirepass "$$REDIS_PASSWORD"
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.mlflow
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - postgresql://${POSTGRES_USER:-neuroflow}:${POSTGRES_PASSWORD}@postgres:5432/neuroflow
+      - --default-artifact-root
+      - /mlartifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_artifacts:/mlartifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: neuroflow-api:latest
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: neuroflow_app
+      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}
+      REDIS_HOST: redis
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OBSERVABILITY_SERVICE_TOKEN: ${OBSERVABILITY_SERVICE_TOKEN:?Set OBSERVABILITY_SERVICE_TOKEN in .env}
+      NEUROFLOW_API_URL: http://api:8000
+      NEUROFLOW_JWT_SECRET: ${NEUROFLOW_JWT_SECRET}
+      NEUROFLOW_AUTH_CLIENTS: ${NEUROFLOW_AUTH_CLIENTS}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+
+  worker:
+    image: neuroflow-api:latest
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    command:
+      - python
+      - -m
+      - worker
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: neuroflow_app
+      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}
+      REDIS_HOST: redis
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OBSERVABILITY_SERVICE_TOKEN: ${OBSERVABILITY_SERVICE_TOKEN:?Set OBSERVABILITY_SERVICE_TOKEN in .env}
+      NEUROFLOW_API_URL: http://api:8000
+      NEUROFLOW_JWT_SECRET: ${NEUROFLOW_JWT_SECRET}
+      NEUROFLOW_AUTH_CLIENTS: ${NEUROFLOW_AUTH_CLIENTS}
+    expose:
+      - "8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      api:
+        condition: service_started
+      worker:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    ports:
+      - "3000:3000"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-neuroflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - postgres
+
+volumes:
+  postgres_data:
+  mlflow_artifacts:
+  prometheus_data:
+  grafana_data:

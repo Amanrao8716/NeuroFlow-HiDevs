@@ -501,13 +501,44 @@ Do not include secrets, dependency credentials, or detailed infrastructure data.
 
 ```text
 neuroflow_http_requests_total{method="POST",route="/query",status="202"} 42
-neuroflow_ingestion_jobs_total{status="succeeded"} 37
-neuroflow_evaluation_queue_depth 4
+neuroflow_ingestion_documents_total{status="succeeded"} 37
+neuroflow_queue_depth{queue="evaluation"} 4
 ```
 
 Labels must avoid user IDs, raw queries, document names, or other high-cardinality/sensitive values.
 
 **Errors:** `401`/`403` if metrics auth is enabled, `429`, `500`, `503`.
+
+## 12. `POST /pipelines/{pipeline_id}/suggestions`
+
+**Purpose:** Persist a quality anomaly reported by the trusted evaluation worker
+and return rule-based optimization suggestions generated from that pipeline's
+persisted evaluation history.
+
+**Authentication:** Dedicated `Authorization: Bearer <OBSERVABILITY_SERVICE_TOKEN>`
+service credential. The endpoint returns `503` when the service credential is
+not configured and `401` for a missing or invalid credential.
+
+**Request:**
+
+```json
+{
+  "run_id": "6c2c56fd-57d0-4b43-8f2b-2eef1e257a33",
+  "latest_score": 0.42,
+  "baseline_mean": 0.81,
+  "baseline_stddev": 0.12
+}
+```
+
+Scores must be between 0 and 1; standard deviation must be non-negative. The
+run must belong to the requested pipeline. A repeated run/rule request is
+deduplicated; additional events for a pipeline/rule are suppressed during the
+24-hour cooldown. The response includes `recorded` and
+`cooldown_suppressed` flags and the persisted advisory suggestions.
+
+The anomaly event is tenant-scoped through PostgreSQL row-level security.
+Migration `011_quality_anomalies.sql` must be applied before enabling this
+endpoint.
 
 ---
 

@@ -1,0 +1,50 @@
+name: Semantic release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    if: >-
+      github.event.pull_request.merged == true &&
+      (contains(toJSON(github.event.pull_request.labels.*.name), 'breaking') ||
+       contains(toJSON(github.event.pull_request.labels.*.name), 'feature') ||
+       contains(toJSON(github.event.pull_request.labels.*.name), 'fix'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Select version increment from merged PR label
+        id: bump
+        env:
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          labels = json.loads(os.environ["PR_LABELS"])
+          bump = next(
+              (value for label, value in (("breaking", "major"), ("feature", "minor"), ("fix", "patch")) if label in labels),
+              None,
+          )
+          if bump is None:
+              raise SystemExit("Merged PR requires breaking, feature, or fix label")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"force={bump}\n")
+          PY
+      - name: Create version, changelog, tag, and GitHub release
+        uses: python-semantic-release/python-semantic-release@v10.7.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          force: ${{ steps.bump.outputs.force }}
+          changelog: "true"
+          vcs_release: "true"
