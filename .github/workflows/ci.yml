@@ -23,15 +23,14 @@ jobs:
       - name: Ruff
         run: ruff check backend/
       - name: Mypy
-        run: mypy backend/ --ignore-missing-imports
-
+        run: mypy backend/ pipelines/ evaluation/ --ignore-missing-imports --exclude '(^|/)tests/'
   test:
     runs-on: ubuntu-latest
     services:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_PASSWORD: testpassword
+          POSTGRES_PASSWORD: testpassword  # pragma: allowlist secret
           POSTGRES_DB: neuroflow_test
         options: >-
           --health-cmd "pg_isready -U postgres -d neuroflow_test"
@@ -53,10 +52,10 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_DB: neuroflow_test
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: testpassword
+      POSTGRES_PASSWORD: testpassword  # pragma: allowlist secret
       REDIS_HOST: localhost
       REDIS_PASSWORD: ""
-      NEUROFLOW_JWT_SECRET: unit-test-signing-key-at-least-32-characters
+      NEUROFLOW_JWT_SECRET: unit-test-signing-key-at-least-32-characters  # pragma: allowlist secret
       NEUROFLOW_AUTH_CLIENTS: "{}"
     steps:
       - uses: actions/checkout@v4
