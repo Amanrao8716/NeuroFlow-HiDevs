@@ -1,3 +1,4 @@
+
 """JWT authentication backed by a server-configured client registry."""
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ class TokenRequest(BaseModel):
         json_schema_extra={
             "example": {
                 "client_id": "service-client",
-                "client_secret": "secret-token-value",
+                "examples" =["sample-value"],  # pragma: allowlist secret
             }
         }
     )
@@ -44,13 +45,13 @@ class TokenRequest(BaseModel):
         min_length=1,
         max_length=128,
         description="Registered client identifier from NEUROFLOW_AUTH_CLIENTS.",
-        examples=["service-client"],
+        examples=["sample-value"],
     )
     client_secret: str = Field(
         min_length=1,
         max_length=4096,
         description="Client secret in plain text, verified against stored scrypt hash.",
-        examples=["secret-token-value"],
+        examples=["sample-value"],
     )
 
 
