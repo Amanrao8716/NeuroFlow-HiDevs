@@ -36,7 +36,7 @@ class TokenRequest(BaseModel):
         json_schema_extra={
             "example": {
                 "client_id": "service-client",
-                "examples" =["sample-value"],  # pragma: allowlist secret
+                "client_secret": "sample-value",
             }
         }
     )
