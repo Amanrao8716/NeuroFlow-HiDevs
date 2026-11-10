@@ -28,6 +28,8 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 
+from resilience._redis_protocol import AsyncRedisProtocol
+
 logger = logging.getLogger(__name__)
 
 # Queue key used by ARQ for ingestion jobs
@@ -71,7 +73,7 @@ class BackpressureGuard:
 
     def __init__(
         self,
-        redis: object,
+        redis: AsyncRedisProtocol,
         *,
         high_threshold: int = HIGH_THRESHOLD,
         warn_threshold: int = WARN_THRESHOLD,

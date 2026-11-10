@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
@@ -21,7 +22,11 @@ from opentelemetry import trace
 from prometheus_client import start_http_server
 from providers.client import NeuroFlowClient
 from redis.exceptions import RedisError
+from resilience._redis_protocol import AsyncRedisProtocol
 from resilience.circuit_breaker import CircuitBreakerRegistry
+
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
 
 from backend.security.prompt_injection import detect_prompt_injection
 from backend.security.secrets import redact_metadata, redact_secrets
@@ -53,7 +58,9 @@ def secure_extracted_pages(pages: list[ExtractedPage], document_id: str) -> list
             page.metadata["prompt_injection_detected"] = True
             page.metadata["prompt_injection_pattern"] = injection.pattern
         page.content, detected_secrets = redact_secrets(page.content)
-        page.metadata = redact_metadata(page.metadata)
+        redacted_meta = redact_metadata(page.metadata)
+        if isinstance(redacted_meta, dict):
+            page.metadata = redacted_meta
         if detected_secrets:
             for pattern_type in sorted(set(detected_secrets)):
                 logger.warning(
@@ -68,7 +75,7 @@ def secure_extracted_pages(pages: list[ExtractedPage], document_id: str) -> list
     return pages
 
 
-async def startup(ctx: dict[str, object]) -> None:
+async def startup(ctx: dict[str, Any]) -> None:
     """Initialize resources used by arq workers."""
     from db.pool import open_pool
 
@@ -85,25 +92,25 @@ async def startup(ctx: dict[str, object]) -> None:
     logger.info("Ingestion worker started.")
 
 
-async def shutdown(ctx: dict[str, object]) -> None:
+async def shutdown(ctx: dict[str, Any]) -> None:
     """Release worker resources."""
     from db.pool import close_pool
 
-    consumer = ctx.get("evaluation_consumer_task")
+    consumer: asyncio.Task[None] | None = ctx.get("evaluation_consumer_task")
     if consumer:
         consumer.cancel()
         try:
             await consumer
         except asyncio.CancelledError:
             pass
-    metrics_task = ctx.get("evaluation_metrics_task")
+    metrics_task: asyncio.Task[None] | None = ctx.get("evaluation_metrics_task")
     if metrics_task:
         metrics_task.cancel()
         try:
             await metrics_task
         except asyncio.CancelledError:
             pass
-    metrics_server = ctx.get("metrics_server")
+    metrics_server: Any = ctx.get("metrics_server")
     if metrics_server:
         metrics_server.shutdown()
         metrics_server.server_close()
@@ -111,9 +118,9 @@ async def shutdown(ctx: dict[str, object]) -> None:
     logger.info("Ingestion worker stopped.")
 
 
-async def _evaluation_queue_consumer(ctx: dict[str, object]) -> None:
+async def _evaluation_queue_consumer(ctx: dict[str, Any]) -> None:
     """Consume legacy evaluation-list messages and run each evaluation once."""
-    redis = ctx["redis"]
+    redis: AsyncRedisProtocol = ctx["redis"]
     queue_key = "neuroflow:queue:evaluations"
     try:
         QUEUE_DEPTH.labels(queue="evaluation").set(await redis.llen(queue_key))
@@ -185,12 +192,12 @@ async def _evaluation_metrics_refresher() -> None:
         await asyncio.sleep(60)
 
 
-async def process_document(ctx: dict[str, object], document_id: str, pipeline_id: str) -> None:
+async def process_document(ctx: dict[str, Any], document_id: str, pipeline_id: str) -> None:
     """Extract, chunk, embed, and persist one document."""
     started = time.perf_counter()
     doc_id = UUID(document_id)
     tenant_id = UUID(pipeline_id)
-    redis = ctx["redis"]
+    redis: AsyncRedisProtocol = ctx["redis"]
     client = NeuroFlowClient(
         redis,
         circuit_breakers=ctx.get("circuit_breakers"),
@@ -394,15 +401,15 @@ async def process_document(ctx: dict[str, object], document_id: str, pipeline_id
 
 
 async def evaluate_pipeline_run(
-    ctx: dict[str, object],
+    ctx: dict[str, Any],
     run_id: str,
     pipeline_id: str,
     trace_context: dict[str, str] | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Asynchronously evaluate a completed RAG pipeline run using LLM-as-a-judge."""
     from evaluation.judge import EvaluationJudge
 
-    redis = ctx.get("redis")
+    redis: AsyncRedisProtocol | None = ctx.get("redis")
     client = (
         NeuroFlowClient(
             redis,
@@ -567,7 +574,7 @@ async def _submit_quality_anomaly(
 
 
 async def poll_finetune_job(
-    ctx: dict[str, object], job_id: str, openai_client: object = None
+    ctx: dict[str, Any], job_id: str, openai_client: AsyncOpenAI | None = None
 ) -> dict[str, object] | None:
     """Poll asynchronous provider fine-tuning job status and handle terminal states."""
     import os
@@ -575,7 +582,7 @@ async def poll_finetune_job(
     from openai import AsyncOpenAI
 
     jid = UUID(job_id)
-    redis = ctx.get("redis")
+    redis: AsyncRedisProtocol | None = ctx.get("redis")
 
     with tracer.start_as_current_span("finetune.poll") as span:
         span.set_attribute("job_id", job_id)
@@ -605,7 +612,7 @@ async def poll_finetune_job(
             logger.warning("Job %s has no provider_job_id.", job_id)
             return {"status": current_status}
 
-        client = openai_client or AsyncOpenAI(
+        client: AsyncOpenAI = openai_client or AsyncOpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
             base_url=os.getenv("OPENAI_BASE_URL") or None,
         )

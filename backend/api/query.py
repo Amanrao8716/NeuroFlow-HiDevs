@@ -265,6 +265,7 @@ _active_streams: dict[str, dict[str, Any]] = {}
 
 @router.post(
     "/query",
+    response_model=None,
     summary="Execute RAG query",
     description=(
         "Run a full retrieval-augmented generation pipeline. "
@@ -273,7 +274,9 @@ _active_streams: dict[str, dict[str, Any]] = {}
     ),
     response_description="QueryResponse (stream=false) or StreamInitResponse (stream=true).",
 )
-async def post_query(request: QueryRequest, req: Request) -> QueryResponse | StreamInitResponse:
+async def post_query(
+    request: QueryRequest, req: Request
+) -> QueryResponse | StreamInitResponse | JSONResponse:
     """Execute RAG generation pipeline.
 
     If stream=false, returns complete JSON response with citations and metadata.

@@ -4,7 +4,6 @@ import json
 
 import pytest
 from opentelemetry import trace
-
 from providers import client as client_module
 
 

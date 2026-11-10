@@ -2,8 +2,17 @@ import asyncio
 import os
 import time
 from collections.abc import AsyncGenerator
+from typing import cast
 
 from openai import AsyncOpenAI, RateLimitError
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessageParam,
+)
+from openai.types.chat.completion_create_params import (
+    CompletionCreateParamsNonStreaming,
+    CompletionCreateParamsStreaming,
+)
 
 from .base import BaseLLMProvider, ChatMessage, GenerationResult
 
@@ -47,14 +56,25 @@ class OpenAIProvider(BaseLLMProvider):
         return self.MODEL_CONTEXT.get(self.model, 128000)
 
     @staticmethod
-    def _format_messages(messages: list[ChatMessage]) -> list[dict[str, str]]:
-        return [{"role": message.role, "content": message.content} for message in messages]
+    def _format_messages(
+        messages: list[ChatMessage],
+    ) -> list[ChatCompletionMessageParam]:
+        return [
+            cast(
+                ChatCompletionMessageParam,
+                {"role": message.role, "content": message.content},
+            )
+            for message in messages
+        ]
 
-    async def _create_completion(self, **kwargs: object) -> object:
+    async def _create_completion(
+        self,
+        request: CompletionCreateParamsNonStreaming,
+    ) -> ChatCompletion:
         """Retry rate-limit errors up to three times."""
         for attempt in range(4):
             try:
-                return await self.client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
+                return await self.client.chat.completions.create(**request)
             except RateLimitError as exc:
                 if attempt == 3:
                     raise
@@ -67,6 +87,8 @@ class OpenAIProvider(BaseLLMProvider):
 
                 await asyncio.sleep(max(0, delay))
 
+        raise RuntimeError("Completion retry loop ended unexpectedly.")
+
     async def complete(
         self,
         messages: list[ChatMessage],
@@ -74,11 +96,20 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> GenerationResult:
         start = time.perf_counter()
 
-        response = await self._create_completion(
-            model=kwargs.pop("model", self.model),
-            messages=self._format_messages(messages),
-            **kwargs,
+        model = kwargs.pop("model", self.model)
+        if not isinstance(model, str):
+            raise TypeError("OpenAI model must be a string.")
+
+        request = cast(
+            CompletionCreateParamsNonStreaming,
+            {
+                "model": model,
+                "messages": self._format_messages(messages),
+                **kwargs,
+            },
         )
+
+        response = await self._create_completion(request)
 
         elapsed_ms = (time.perf_counter() - start) * 1000
         choice = response.choices[0]
@@ -86,16 +117,17 @@ class OpenAIProvider(BaseLLMProvider):
 
         input_tokens = usage.prompt_tokens if usage else 0
         output_tokens = usage.completion_tokens if usage else 0
-        model = response.model or self.model
+        response_model = response.model or self.model
 
         input_price, output_price = self.MODEL_PRICING.get(
-            model, self.MODEL_PRICING.get(self.model, (0.15, 0.60))
+            response_model,
+            self.MODEL_PRICING.get(self.model, (0.15, 0.60)),
         )
         cost = (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 
         return GenerationResult(
             content=choice.message.content or "",
-            model=model,
+            model=response_model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             latency_ms=elapsed_ms,
@@ -109,13 +141,20 @@ class OpenAIProvider(BaseLLMProvider):
         **kwargs: object,
     ) -> AsyncGenerator[str, None]:
         model = kwargs.pop("model", self.model)
+        if not isinstance(model, str):
+            raise TypeError("OpenAI model must be a string.")
 
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=self._format_messages(messages),
-            stream=True,
-            **kwargs,
+        request = cast(
+            CompletionCreateParamsStreaming,
+            {
+                "model": model,
+                "messages": self._format_messages(messages),
+                "stream": True,
+                **kwargs,
+            },
         )
+
+        response = await self.client.chat.completions.create(**request)
 
         async for chunk in response:
             if not chunk.choices:
@@ -126,7 +165,7 @@ class OpenAIProvider(BaseLLMProvider):
                 yield text
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        embeddings = []
+        embeddings: list[list[float]] = []
 
         for start in range(0, len(texts), 100):
             batch = texts[start : start + 100]

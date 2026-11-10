@@ -1,3 +1,4 @@
+
 """Retrieval evaluation runner measuring Hit Rate@10 and MRR@10 for RRF and Cross-Encoder."""
 
 from __future__ import annotations
@@ -7,11 +8,15 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from db.pool import close_pool, open_pool, pipeline_connection
+from asyncpg import Connection
+from db.pool import close_pool, connection, open_pool, pipeline_connection
+
 from pipelines.retrieval import (
     CrossEncoderReranker,
     HybridRetriever,
@@ -88,7 +93,8 @@ async def run_evaluation(
     await open_pool()
     try:
         # 1. Check database chunk count
-        async with pipeline_connection(pipeline_id) if pipeline_id else await _get_direct_conn() as conn:
+        conn_ctx = pipeline_connection(pipeline_id) if pipeline_id else connection()
+        async with conn_ctx as conn:
             chunk_count = await conn.fetchval("SELECT count(*) FROM chunks;")
 
         logger.info("Found %d total stored chunks in database.", chunk_count)
@@ -100,8 +106,8 @@ async def run_evaluation(
             )
             logger.warning(message)
             instructions = (
-                f"To load sufficient data, use the Task 4 ingestion pipeline:\n"
-                f"  POST /ingest (PDF, DOCX, CSV, image) or POST /ingest/url\n"
+                "To load sufficient data, use the Task 4 ingestion pipeline:\n"
+                "  POST /ingest (PDF, DOCX, CSV, image) or POST /ingest/url\n"
                 f"Ingest documents containing at least {MIN_REQUIRED_CHUNKS} total chunks."
             )
 
@@ -116,16 +122,27 @@ async def run_evaluation(
                 "instructions": instructions,
                 "limitations": message,
             }
-            output_path.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+            await asyncio.to_thread(
+                output_path.write_text,
+                json.dumps(result_payload, indent=2),
+                encoding="utf-8",
+            )
             return result_payload
 
         # 2. Load dataset
         if eval_dataset is None:
-            if DATASET_PATH.is_file():
-                eval_dataset = json.loads(DATASET_PATH.read_text(encoding="utf-8"))
+            dataset_exists = await asyncio.to_thread(DATASET_PATH.is_file)
+
+            if dataset_exists:
+                dataset_text = await asyncio.to_thread(
+                    DATASET_PATH.read_text,
+                    encoding="utf-8",
+                )
+                eval_dataset = json.loads(dataset_text)
             else:
                 raise FileNotFoundError(
-                    f"Evaluation dataset not found at {DATASET_PATH}. Please provide 20 questions."
+                    f"Evaluation dataset not found at {DATASET_PATH}. "
+                    "Please provide 20 questions."
                 )
 
         if len(eval_dataset) < 20:
@@ -137,7 +154,6 @@ async def run_evaluation(
 
         rrf_results_by_query: dict[str, list[str]] = {}
         rerank_results_by_query: dict[str, list[str]] = {}
-        hyde_results_by_query: dict[str, list[str]] = {}
 
         # 3. Run evaluation across all queries
         for item in eval_dataset:
@@ -163,22 +179,31 @@ async def run_evaluation(
             # B. Cross-Encoder Reranking
             if fused_candidates:
                 reranked_candidates = await reranker.rerank(
-                    query_text, fused_candidates, top_n=40
+                    query_text,
+                    fused_candidates,
+                    top_n=40,
                 )
-                rerank_results_by_query[qid] = [c.chunk_id for c in reranked_candidates]
+                rerank_results_by_query[qid] = [
+                    c.chunk_id for c in reranked_candidates
+                ]
             else:
                 rerank_results_by_query[qid] = []
 
         # 4. Compute Metrics
         rrf_hit_rate, rrf_mrr, rrf_details = compute_metrics(
-            eval_dataset, rrf_results_by_query, k=10
+            eval_dataset,
+            rrf_results_by_query,
+            k=10,
         )
         rerank_hit_rate, rerank_mrr, rerank_details = compute_metrics(
-            eval_dataset, rerank_results_by_query, k=10
+            eval_dataset,
+            rerank_results_by_query,
+            k=10,
         )
 
-        thresholds_met = (rerank_hit_rate > HIT_RATE_THRESHOLD) and (
-            rerank_mrr > MRR_THRESHOLD
+        thresholds_met = (
+            rerank_hit_rate > HIT_RATE_THRESHOLD
+            and rerank_mrr > MRR_THRESHOLD
         )
 
         result_payload = {
@@ -214,9 +239,15 @@ async def run_evaluation(
             ],
         }
 
-        output_path.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+        await asyncio.to_thread(
+            output_path.write_text,
+            json.dumps(result_payload, indent=2),
+            encoding="utf-8",
+        )
+
         logger.info(
-            "Evaluation complete: RRF (HitRate: %.4f, MRR: %.4f) -> Reranked (HitRate: %.4f, MRR: %.4f) | Pass: %s",
+            "Evaluation complete: RRF (HitRate: %.4f, MRR: %.4f) "
+            "-> Reranked (HitRate: %.4f, MRR: %.4f) | Pass: %s",
             rrf_hit_rate,
             rrf_mrr,
             rerank_hit_rate,
@@ -229,11 +260,15 @@ async def run_evaluation(
         await close_pool()
 
 
-async def _get_direct_conn():
+@asynccontextmanager
+async def _get_direct_conn() -> AsyncIterator[Connection]:
     from db.pool import get_pool
 
     pool = get_pool()
-    return pool.acquire()
+
+    async with pool.acquire() as acquired_conn:
+        conn = cast(Connection, acquired_conn)
+        yield conn
 
 
 if __name__ == "__main__":
@@ -254,5 +289,6 @@ if __name__ == "__main__":
 
     if args.env == "staging" and not args.pipeline_id:
         parser.error("NEUROFLOW_PIPELINE_ID is required for staging evaluation")
+
     pid = UUID(args.pipeline_id) if args.pipeline_id else None
     asyncio.run(run_evaluation(pipeline_id=pid))

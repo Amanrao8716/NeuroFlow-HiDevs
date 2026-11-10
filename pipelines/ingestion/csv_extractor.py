@@ -6,7 +6,6 @@ import pandas as pd
 
 from pipelines.ingestion.models import ExtractedPage
 
-
 BLOCK_SIZE = 100
 SUMMARY_THRESHOLD = 1000
 
@@ -20,11 +19,7 @@ def extract_csv(file_bytes: bytes) -> list[ExtractedPage]:
 
     results: list[ExtractedPage] = []
     numeric_columns = dataframe.select_dtypes(include="number").columns.tolist()
-    text_columns = [
-        column
-        for column in dataframe.columns
-        if column not in numeric_columns
-    ]
+    text_columns = [column for column in dataframe.columns if column not in numeric_columns]
 
     column_metadata = {
         "columns": dataframe.columns.tolist(),

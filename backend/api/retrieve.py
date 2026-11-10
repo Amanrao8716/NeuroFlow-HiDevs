@@ -1,10 +1,8 @@
-"""FastAPI endpoint for hybrid retrieval, reranking, and context assembly."""
-
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,6 +13,7 @@ from backend.security.auth import require_scope
 from backend.security.prompt_injection import classify_query, detect_prompt_injection
 from backend.security.secrets import redact_secrets
 from backend.security.validators import sanitize_text
+from pipelines.generation.generator import GenerationPipeline
 from pipelines.retrieval import (
     ContextAssembler,
     CrossEncoderReranker,
@@ -60,7 +59,7 @@ class ChunkResponse(BaseModel):
 
 
 class RetrieveResponse(BaseModel):
-    """Full hybrid retrieval and context assembly response."""
+    """Full retrieval and context assembly response."""
 
     query: str
     query_type: str
@@ -82,6 +81,22 @@ class RetrievalRankingResponse(BaseModel):
     hybrid_reranked: list[str]
 
 
+def _configure_retriever(req: Request) -> GenerationPipeline:
+    """Configure the shared retriever with the application's embedding client."""
+    from api.query import get_generation_pipeline
+
+    pipeline = cast(GenerationPipeline, get_generation_pipeline(req))
+
+    if pipeline.client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Query embedding service is unavailable.",
+        )
+
+    _retriever.set_embed_fn(pipeline.client.embed)
+    return pipeline
+
+
 @router.post(
     "/retrieve",
     response_model=RetrieveResponse,
@@ -92,41 +107,58 @@ class RetrievalRankingResponse(BaseModel):
     ),
     response_description="Retrieved chunks with scores, assembled context, and retrieval metadata.",
 )
-async def retrieve_endpoint(request: RetrieveRequest, req: Request) -> RetrieveResponse:
+async def retrieve_endpoint(
+    request: RetrieveRequest, req: Request
+) -> RetrieveResponse | JSONResponse:
     """Execute hybrid retrieval, reciprocal rank fusion, and context assembly."""
     try:
-        # 1. Query Processing
         query_text = sanitize_text(request.query)
+
         if not query_text.strip():
             raise HTTPException(status_code=422, detail="Query must contain text.")
+
         query_text, secret_types = redact_secrets(query_text)
+
         for pattern_type in sorted(set(secret_types)):
             logger.warning("Sensitive value redacted from query (%s).", pattern_type)
+
         detection = detect_prompt_injection(query_text)
+
         if detection.detected:
-            logger.warning("User query matched prompt injection signal %s", detection.pattern)
-        from api.query import get_generation_pipeline
+            logger.warning(
+                "User query matched prompt injection signal %s",
+                detection.pattern,
+            )
 
         try:
-            if await classify_query(
-                getattr(get_generation_pipeline(req), "client", None), query_text
-            ):
+            pipeline = _configure_retriever(req)
+
+            if await classify_query(pipeline.client, query_text):
                 return JSONResponse(
                     status_code=400,
-                    content={"error": "query_rejected", "reason": "potential_prompt_injection"},
+                    content={
+                        "error": "query_rejected",
+                        "reason": "potential_prompt_injection",
+                    },
                 )
         except HTTPException:
             raise
         except Exception as exc:
             logger.warning(
-                "Prompt injection classifier unavailable (%s); failing closed.", type(exc).__name__
+                "Prompt injection classifier unavailable (%s); failing closed.",
+                type(exc).__name__,
             )
             raise HTTPException(
-                status_code=503, detail="Query security classification unavailable."
+                status_code=503,
+                detail="Query security classification unavailable.",
             ) from exc
-        processed = await _processor.process(query_text, explicit_filters=request.filters)
 
-        # 2. Parallel Multi-Method Retrieval (Dense, Sparse, Metadata)
+        processed = await _processor.process(
+            query_text,
+            explicit_filters=request.filters,
+        )
+
+        # Parallel multi-method retrieval.
         dense_res, sparse_res, meta_res = await _retriever.retrieve_parallel(
             query=processed,
             k=request.top_k * 2,
@@ -134,40 +166,52 @@ async def retrieve_endpoint(request: RetrieveRequest, req: Request) -> RetrieveR
             filters=processed.filters,
         )
 
-        # 3. Reciprocal Rank Fusion
+        # Reciprocal rank fusion.
         result_lists = [dense_res, sparse_res]
+
         if meta_res:
             result_lists.append(meta_res)
+
         fused = reciprocal_rank_fusion(result_lists)
 
-        # 4. Optional Cross-Encoder Reranking
+        # Optional cross-encoder reranking.
         if request.rerank and fused:
             try:
-                candidates = await _reranker.rerank(processed.query, fused, top_n=40)
+                candidates = await _reranker.rerank(
+                    processed.query,
+                    fused,
+                    top_n=40,
+                )
             except Exception as rerank_err:
-                logger.warning("Reranking failed, using RRF candidates: %s", rerank_err)
+                logger.warning(
+                    "Reranking failed, using RRF candidates: %s",
+                    rerank_err,
+                )
                 candidates = fused
         else:
             candidates = fused
 
         top_candidates = candidates[: request.top_k]
 
-        # 5. Context Assembly with Token Budget
-        assembled = _assembler.assemble(top_candidates, max_tokens=request.max_context_tokens)
+        # Context assembly with token budget.
+        assembled = _assembler.assemble(
+            top_candidates,
+            max_tokens=request.max_context_tokens,
+        )
 
         chunk_responses = [
             ChunkResponse(
-                chunk_id=c.chunk_id,
-                document_id=c.document_id,
-                content=c.content,
-                score=round(c.score, 6),
-                rank=c.rank,
-                source_type=c.source_type,
-                filename=c.filename,
-                page_number=c.page_number,
-                metadata=c.metadata,
+                chunk_id=chunk.chunk_id,
+                document_id=chunk.document_id,
+                content=chunk.content,
+                score=round(chunk.score, 6),
+                rank=chunk.rank,
+                source_type=chunk.source_type,
+                filename=chunk.filename,
+                page_number=chunk.page_number,
+                metadata=chunk.metadata,
             )
-            for c in top_candidates
+            for chunk in top_candidates
         ]
 
         return RetrieveResponse(
@@ -182,20 +226,32 @@ async def retrieve_endpoint(request: RetrieveRequest, req: Request) -> RetrieveR
             chunks=chunk_responses,
         )
 
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.exception("Retrieval pipeline failed for query '%s'", request.query)
-        raise HTTPException(status_code=500, detail=f"Retrieval failed: {str(exc)}") from exc
+        logger.exception(
+            "Retrieval pipeline failed for query '%s'",
+            request.query,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Retrieval failed: {str(exc)}",
+        ) from exc
 
 
-@router.post("/__test__/retrieval-rankings", response_model=RetrievalRankingResponse)
+@router.post(
+    "/__test__/retrieval-rankings",
+    response_model=RetrievalRankingResponse,
+)
 async def retrieval_rankings_for_test(
     request: RetrieveRequest,
     req: Request,
     _admin: object = Depends(require_scope("admin")),
 ) -> RetrievalRankingResponse:
-    """Return actual retrieval rankings only when an isolated test deployment opts in."""
+    """Return retrieval rankings only when an isolated test deployment opts in."""
     if os.getenv("NEUROFLOW_TEST_BENCHMARK_ENDPOINT") != "true":
         raise HTTPException(status_code=404, detail="Not found.")
+
     if os.getenv("HF_HUB_OFFLINE") != "1" or os.getenv("TRANSFORMERS_OFFLINE") != "1":
         raise HTTPException(
             status_code=503,
@@ -206,38 +262,66 @@ async def retrieval_rankings_for_test(
         )
 
     query_text = sanitize_text(request.query)
+
     if not query_text.strip():
         raise HTTPException(status_code=422, detail="Query must contain text.")
+
     query_text, secret_types = redact_secrets(query_text)
+
     for pattern_type in sorted(set(secret_types)):
-        logger.warning("Sensitive value redacted from benchmark query (%s).", pattern_type)
+        logger.warning(
+            "Sensitive value redacted from benchmark query (%s).",
+            pattern_type,
+        )
+
     detection = detect_prompt_injection(query_text)
+
     if detection.detected:
-        raise HTTPException(status_code=400, detail="Benchmark query rejected by security policy.")
-    from api.query import get_generation_pipeline
+        raise HTTPException(
+            status_code=400,
+            detail="Benchmark query rejected by security policy.",
+        )
 
     try:
-        if await classify_query(getattr(get_generation_pipeline(req), "client", None), query_text):
+        pipeline = _configure_retriever(req)
+
+        if await classify_query(pipeline.client, query_text):
             raise HTTPException(
-                status_code=400, detail="Benchmark query rejected by security policy."
+                status_code=400,
+                detail="Benchmark query rejected by security policy.",
             )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Benchmark query classifier unavailable (%s).", type(exc).__name__)
+        logger.warning(
+            "Benchmark query classifier unavailable (%s).",
+            type(exc).__name__,
+        )
         raise HTTPException(
-            status_code=503, detail="Query security classification unavailable."
+            status_code=503,
+            detail="Query security classification unavailable.",
         ) from exc
 
-    processed = await _processor.process(query_text, explicit_filters=request.filters)
+    processed = await _processor.process(
+        query_text,
+        explicit_filters=request.filters,
+    )
+
     dense, sparse, _metadata = await _retriever.retrieve_parallel(
         query=processed,
         k=request.top_k,
         pipeline_id=request.pipeline_id,
         filters=processed.filters,
     )
+
     fused = reciprocal_rank_fusion([dense, sparse])
-    reranked = await _reranker.rerank(processed.query, fused, top_n=40) if fused else []
+
+    reranked = (
+        await _reranker.rerank(processed.query, fused, top_n=40)
+        if fused
+        else []
+    )
+
     return RetrievalRankingResponse(
         dense_only=[item.chunk_id for item in dense],
         sparse_only=[item.chunk_id for item in sparse],

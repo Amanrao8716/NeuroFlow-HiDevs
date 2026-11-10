@@ -49,21 +49,12 @@ def extract_docx(file_bytes: bytes) -> list[ExtractedPage]:
         block_number += 1
 
     for table_index, table in enumerate(document.tables):
-        rows = [
-            [
-                cell.text.replace("\n", " ").strip()
-                for cell in row.cells
-            ]
-            for row in table.rows
-        ]
+        rows = [[cell.text.replace("\n", " ").strip() for cell in row.cells] for row in table.rows]
 
         if not rows:
             continue
 
-        markdown = "\n".join(
-            "| " + " | ".join(row) + " |"
-            for row in rows
-        )
+        markdown = "\n".join("| " + " | ".join(row) + " |" for row in rows)
 
         results.append(
             ExtractedPage(

@@ -1,32 +1,36 @@
+
 """MLflow Experiment Tracking and Artifact Logging for Fine-Tuning Jobs."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from config import settings
+
+if TYPE_CHECKING:
+    from mlflow.tracking import MlflowClient
 
 logger = logging.getLogger("neuroflow.finetuning.tracker")
 
 
 class MLflowTracker:
-    """Manages MLflow runs, parameters, metrics, and artifact tracking for fine-tuning jobs."""
+    """Manage MLflow runs, parameters, metrics, and fine-tuning artifacts."""
 
     def __init__(
         self,
         tracking_uri: str | None = None,
         experiment_name: str = "neuroflow-finetuning",
-    ):
+    ) -> None:
         self.tracking_uri = (tracking_uri or settings.mlflow_tracking_uri).rstrip("/")
         self.experiment_name = experiment_name
-        self._client: Any = None
+        self._client: MlflowClient | None = None
         self._experiment_id: str | None = None
 
-    def _get_client(self) -> Any:
-        """Lazy-initialize and return MlflowClient."""
+    def _get_client(self) -> MlflowClient:
+        """Lazy-initialize and return the MLflow client."""
         if self._client is None:
             try:
                 import mlflow
@@ -35,12 +39,19 @@ class MLflowTracker:
                 mlflow.set_tracking_uri(self.tracking_uri)
                 self._client = MlflowClient(tracking_uri=self.tracking_uri)
             except Exception as exc:
-                logger.error("Failed to initialize MLflow client with tracking URI %s: %s", self.tracking_uri, exc)
-                raise RuntimeError(f"MLflow service unavailable at {self.tracking_uri}: {exc}") from exc
+                logger.error(
+                    "Failed to initialize MLflow client with tracking URI %s: %s",
+                    self.tracking_uri,
+                    exc,
+                )
+                raise RuntimeError(
+                    f"MLflow service unavailable at {self.tracking_uri}: {exc}"
+                ) from exc
+
         return self._client
 
     def _ensure_experiment(self) -> str:
-        """Retrieve existing experiment or create a new one."""
+        """Retrieve an existing experiment or create a new one."""
         if self._experiment_id:
             return self._experiment_id
 
@@ -52,7 +63,11 @@ class MLflowTracker:
             else:
                 self._experiment_id = client.create_experiment(self.experiment_name)
         except Exception as exc:
-            logger.error("Error creating/retrieving MLflow experiment '%s': %s", self.experiment_name, exc)
+            logger.error(
+                "Error creating/retrieving MLflow experiment '%s': %s",
+                self.experiment_name,
+                exc,
+            )
             raise RuntimeError(f"MLflow experiment setup failed: {exc}") from exc
 
         return self._experiment_id
@@ -66,7 +81,7 @@ class MLflowTracker:
         date_range: str | None,
         training_file_path: Path | str,
     ) -> tuple[str, str]:
-        """Create an MLflow run named 'finetune-{job_id}', log parameters, and log JSONL artifact.
+        """Create an MLflow run, log parameters, and log the JSONL artifact.
 
         Returns:
             Tuple of (mlflow_run_id, mlflow_run_url).
@@ -86,25 +101,45 @@ class MLflowTracker:
             )
             run_id = run.info.run_id
 
-            # 1. Log required parameters
             client.log_param(run_id, "base_model", base_model)
-            client.log_param(run_id, "accepted_training_pair_count", str(training_pair_count))
+            client.log_param(
+                run_id,
+                "accepted_training_pair_count",
+                str(training_pair_count),
+            )
             client.log_param(
                 run_id,
                 "average_quality_score",
-                f"{average_quality_score:.4f}" if average_quality_score is not None else "N/A",
+                (
+                    f"{average_quality_score:.4f}"
+                    if average_quality_score is not None
+                    else "N/A"
+                ),
             )
-            client.log_param(run_id, "training_data_date_range", date_range or "N/A")
+            client.log_param(
+                run_id,
+                "training_data_date_range",
+                date_range or "N/A",
+            )
 
-            # 2. Log JSONL training file as artifact
-            p = Path(training_file_path)
-            if p.exists():
-                client.log_artifact(run_id, str(p), artifact_path="training_data")
+            path = Path(training_file_path)
+            if path.exists():
+                client.log_artifact(
+                    run_id,
+                    str(path),
+                    artifact_path="training_data",
+                )
 
-            # 3. Format run URL for API inspection
-            run_url = f"{self.tracking_uri}/#/experiments/{experiment_id}/runs/{run_id}"
+            run_url = (
+                f"{self.tracking_uri}/#/experiments/{experiment_id}/runs/{run_id}"
+            )
 
-            logger.info("Created MLflow run %s for job %s at %s", run_id, job_id, run_url)
+            logger.info(
+                "Created MLflow run %s for job %s at %s",
+                run_id,
+                job_id,
+                run_url,
+            )
             return run_id, run_url
 
         except Exception as exc:
@@ -118,13 +153,13 @@ class MLflowTracker:
         trained_tokens: int | None = None,
         status: str = "FINISHED",
     ) -> None:
-        """Log training metrics (loss, tokens) and set final run status.
+        """Log training metrics and set the final run status.
 
         Args:
             run_id: The MLflow run ID.
-            metrics: Optional dictionary containing metrics (training_loss, validation_loss).
+            metrics: Optional training and validation metrics.
             trained_tokens: Total tokens trained during fine-tuning.
-            status: Terminal status: 'FINISHED' or 'FAILED'.
+            status: Terminal status, either FINISHED or FAILED.
         """
         if not run_id:
             return
@@ -132,20 +167,25 @@ class MLflowTracker:
         client = self._get_client()
         try:
             if metrics:
-                for k, v in metrics.items():
-                    if isinstance(v, (int, float)):
-                        client.log_metric(run_id, k, float(v))
+                for key, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        client.log_metric(run_id, key, float(value))
 
             if trained_tokens is not None:
                 client.log_metric(run_id, "trained_tokens", float(trained_tokens))
 
-            # Set terminal status
             client.set_terminated(run_id, status=status)
-            logger.info("Updated MLflow run %s with status %s and metrics %s", run_id, status, metrics)
+            logger.info(
+                "Updated MLflow run %s with status %s and metrics %s",
+                run_id,
+                status,
+                metrics,
+            )
         except Exception as exc:
             logger.warning("Failed to log metrics to MLflow run %s: %s", run_id, exc)
-            # Re-raise or log explicitly so failures are not silently swallowed
-            raise RuntimeError(f"Failed to log metrics to MLflow run {run_id}: {exc}") from exc
+            raise RuntimeError(
+                f"Failed to log metrics to MLflow run {run_id}: {exc}"
+            ) from exc
 
     def register_model_artifact(
         self,
@@ -153,30 +193,34 @@ class MLflowTracker:
         artifact_path: str = "model",
         registered_model_name: str | None = None,
     ) -> dict[str, Any]:
-        """Attempt to register a logged model artifact if a real model artifact exists in MLflow.
+        """Register a model artifact when local model weights exist.
 
-        Note: When using cloud API fine-tuning (e.g. OpenAI), weights are hosted by the provider
-        and no local model artifact binary is downloaded. In that case, we report that limitation
-        explicitly and record the provider model identifier separately.
+        Cloud API fine-tuning providers host their own model weights.
+        In that case, report the limitation and record the provider model
+        identifier separately.
         """
         client = self._get_client()
         try:
-            # Check if artifact exists
             artifacts = client.list_artifacts(run_id, path=artifact_path)
             if not artifacts:
                 msg = (
                     "No local model weight artifact found in MLflow run. "
-                    "For cloud API fine-tuning, model is managed remotely by the provider; "
-                    "provider model identifier is recorded in the model registry."
+                    "For cloud API fine-tuning, the provider manages the model; "
+                    "its model identifier is recorded in the model registry."
                 )
                 logger.info(msg)
                 return {"registered": False, "reason": msg}
 
             reg_name = registered_model_name or f"neuroflow-{run_id}"
             import mlflow
+
             model_uri = f"runs:/{run_id}/{artifact_path}"
-            mv = mlflow.register_model(model_uri, reg_name)
-            return {"registered": True, "name": reg_name, "version": mv.version}
+            model_version = mlflow.register_model(model_uri, reg_name)
+            return {
+                "registered": True,
+                "name": reg_name,
+                "version": model_version.version,
+            }
         except Exception as exc:
             logger.warning("Could not register model artifact in MLflow: %s", exc)
             return {"registered": False, "error": str(exc)}

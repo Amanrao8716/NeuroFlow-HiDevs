@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
 from backend.tasks.retention import (
     BATCH_SIZE,
     _acquire_lock,

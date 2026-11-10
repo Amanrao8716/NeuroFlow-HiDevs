@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from pipelines.generation.prompt_builder import SourceMapEntry
@@ -55,9 +55,9 @@ class ParsedCitations:
 
 
 class CitationTracker:
-    """Extracts, validates, deduplicates, and maps source citations against the prompt source map."""
+    """Extract, validate, deduplicate, and map citations against prompt sources."""
 
-    def __init__(self, citation_regex: re.Pattern = CITATION_REGEX):
+    def __init__(self, citation_regex: re.Pattern[str] = CITATION_REGEX) -> None:
         self.citation_regex = citation_regex
 
     def extract_and_validate(

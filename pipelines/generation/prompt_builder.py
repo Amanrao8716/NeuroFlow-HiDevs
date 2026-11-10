@@ -1,3 +1,4 @@
+
 """Dynamic prompt assembly for Task 6 RAG generation pipeline."""
 
 from __future__ import annotations
@@ -20,19 +21,26 @@ BASE_SYSTEM_PROMPT = (
 QUERY_TYPE_INSTRUCTIONS: dict[str, str] = {
     "factual": (
         "Answer directly. Include only details needed to resolve the question. "
-        "Example format: 'The primary mechanism is X [Source 1], which was introduced in 2022 [Source 2].'"
+        "Example format: 'The primary mechanism is X [Source 1], "
+        "which was introduced in 2022 [Source 2].'"
     ),
     "analytical": (
-        "Separate supported observations from conclusions. Explain relationships and cite evidence for each conclusion. "
-        "Example format: 'Observation: Metric A increased by 15% [Source 1]. Analysis: This correlates with factor B [Source 2].'"
+        "Separate supported observations from conclusions. "
+        "Explain relationships and cite evidence for each conclusion. "
+        "Example format: 'Observation: Metric A increased by 15% [Source 1]. "
+        "Analysis: This correlates with factor B [Source 2].'"
     ),
     "comparative": (
-        "Compare the requested items on the same criteria. Cite evidence for each side and identify missing comparisons. "
-        "Example format: 'Criterion 1: Option A exhibits X [Source 1], whereas Option B exhibits Y [Source 2].'"
+        "Compare the requested items on the same criteria. "
+        "Cite evidence for each side and identify missing comparisons. "
+        "Example format: 'Criterion 1: Option A exhibits X [Source 1], "
+        "whereas Option B exhibits Y [Source 2].'"
     ),
     "procedural": (
-        "Give ordered steps only when the context supports their order. Cite each step and state when a step is not documented. "
-        "Example format: '1. Configure setting A [Source 1]. 2. Execute process B [Source 2].'"
+        "Give ordered steps only when the context supports their order. "
+        "Cite each step and state when a step is not documented. "
+        "Example format: '1. Configure setting A [Source 1]. "
+        "2. Execute process B [Source 2].'"
     ),
 }
 
@@ -79,9 +87,9 @@ class AssembledPrompt:
 
 
 class PromptBuilder:
-    """Builds query-type conditioned prompts with structured context and deterministic source mapping."""
+    """Build query-type conditioned prompts with structured context and source mapping."""
 
-    def __init__(self, base_system_prompt: str = BASE_SYSTEM_PROMPT):
+    def __init__(self, base_system_prompt: str = BASE_SYSTEM_PROMPT) -> None:
         self.base_system_prompt = base_system_prompt
 
     def build(
@@ -95,8 +103,8 @@ class PromptBuilder:
 
         Args:
             query: The original user search query.
-            query_type: Type from query classification (factual, analytical, comparative, procedural).
-            context: Either an AssembledContext or a list of RetrievalResult candidates.
+            query_type: Classification type: factual, analytical, comparative, or procedural.
+            context: An AssembledContext or a list of RetrievalResult candidates.
             pipeline_config: Optional pipeline configuration dictionary.
 
         Returns:
@@ -111,11 +119,20 @@ class PromptBuilder:
             gen_cfg = pipeline_config.get("generation", {})
             variant = gen_cfg.get("system_prompt_variant", "default")
             if variant == "concise":
-                system_prompt += "\n\nStyle Instruction: Keep answers extremely concise and direct, omitting conversational filler."
+                system_prompt += (
+                    "\n\nStyle Instruction: Keep answers extremely concise and direct, "
+                    "omitting conversational filler."
+                )
             elif variant == "detailed":
-                system_prompt += "\n\nStyle Instruction: Provide comprehensive, in-depth explanations with thorough source analysis."
+                system_prompt += (
+                    "\n\nStyle Instruction: Provide comprehensive, in-depth explanations "
+                    "with thorough source analysis."
+                )
             elif variant == "technical":
-                system_prompt += "\n\nStyle Instruction: Use rigorous, precise engineering terminology and architectural detail."
+                system_prompt += (
+                    "\n\nStyle Instruction: Use rigorous, precise engineering terminology "
+                    "and architectural detail."
+                )
 
         # Build context blocks and deterministic source map
         context_blocks: list[str] = []
@@ -140,7 +157,7 @@ class PromptBuilder:
         else:
             raw_sources = []
 
-        # If context is AssembledContext, parse out chunk contents from sources or fallback
+        # If context is AssembledContext, parse chunk contents from sources or fallback
         for idx, src in enumerate(raw_sources, start=1):
             source_num = src.get("source_index", idx)
             chunk_id = str(src.get("chunk_id", ""))
@@ -173,17 +190,18 @@ class PromptBuilder:
                 safe_content = raw_content.replace("</context>", "")
                 context_blocks.append(f"[{header_str}]\n{safe_content}")
 
-        # If context was AssembledContext with pre-formatted context string
+        # If context is AssembledContext with a pre-formatted context string
         if isinstance(context, AssembledContext) and context.context and not context_blocks:
             # Context text is already formatted with headers from ContextAssembler
             safe_context_str = context.context.replace("</context>", "")
             context_section = f"<context>\n{safe_context_str}\n</context>"
+
             # Also populate preview for source map entries if possible
             for s_num, entry in source_map.items():
                 pattern = rf"\[Source {s_num}[^\]]*\]\s*([\s\S]*?)(?=\[Source \d+|$)"
-                m = re.search(pattern, context.context)
-                if m:
-                    extracted = m.group(1).strip()
+                match = re.search(pattern, context.context)
+                if match:
+                    extracted = match.group(1).strip()
                     entry.content_preview = extracted[:100]
         elif context_blocks:
             context_section = "<context>\n" + "\n\n".join(context_blocks) + "\n</context>"

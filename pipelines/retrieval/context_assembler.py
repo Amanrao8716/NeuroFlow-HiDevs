@@ -1,11 +1,15 @@
+
 """Context assembly with strict token budgeting, source headers, and sentence boundaries."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import logging
 import re
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tiktoken import Encoding
 
 from pipelines.retrieval.retriever import RetrievalResult
 
@@ -18,7 +22,8 @@ DEFAULT_ENCODING = "cl100k_base"
 class TokenCounter:
     """Reusable token counter backed by tiktoken with character ratio fallback."""
 
-    def __init__(self, encoding_name: str = DEFAULT_ENCODING):
+    def __init__(self, encoding_name: str = DEFAULT_ENCODING) -> None:
+        self._encoder: Encoding | None = None
         try:
             import tiktoken
 
@@ -77,7 +82,7 @@ class ContextAssembler:
         self,
         token_counter: TokenCounter | None = None,
         default_budget: int = DEFAULT_TOKEN_BUDGET,
-    ):
+    ) -> None:
         self.counter = token_counter or TokenCounter()
         self.default_budget = default_budget
 
@@ -156,11 +161,13 @@ class ContextAssembler:
                 partial_sentences: list[str] = []
                 partial_cost = 0
 
-                for s in sentences:
-                    s_cost = self.counter.count(" " + s if partial_sentences else s)
-                    if partial_cost + s_cost <= available_for_content:
-                        partial_sentences.append(s)
-                        partial_cost += s_cost
+                for sentence in sentences:
+                    sentence_cost = self.counter.count(
+                        " " + sentence if partial_sentences else sentence
+                    )
+                    if partial_cost + sentence_cost <= available_for_content:
+                        partial_sentences.append(sentence)
+                        partial_cost += sentence_cost
                     else:
                         break
 

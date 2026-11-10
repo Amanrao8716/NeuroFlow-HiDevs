@@ -6,12 +6,11 @@ from io import BytesIO
 
 import pytesseract
 from PIL import Image
-
 from providers.base import ChatMessage
 from providers.client import NeuroFlowClient
 from providers.router import RoutingCriteria
-from pipelines.ingestion.models import ExtractedPage
 
+from pipelines.ingestion.models import ExtractedPage
 
 MAX_IMAGE_SIDE = 1024
 
@@ -65,12 +64,7 @@ async def extract_image(
                             },
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": (
-                                        "data:image/jpeg;base64,"
-                                        + image_base64
-                                    )
-                                },
+                                "image_url": {"url": ("data:image/jpeg;base64," + image_base64)},
                             },
                         ],
                     )

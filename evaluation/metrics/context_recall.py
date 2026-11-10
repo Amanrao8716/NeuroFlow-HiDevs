@@ -1,7 +1,8 @@
+
 """Context Recall metric — measure coverage of required information in retrieved context.
 
-Evaluates whether the retrieved context contains all necessary facts and information to completely
-answer the query. Scores between 0.0 and 1.0.
+Evaluates whether the retrieved context contains all necessary facts and information
+to completely answer the query. Scores between 0.0 and 1.0.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from providers.base import ChatMessage, GenerationResult
 
@@ -52,6 +53,22 @@ ANSWER:
 """
 
 
+@runtime_checkable
+class LLMClientProtocol(Protocol):
+    """Minimal protocol for the LLM client used by this metric.
+
+    The client must provide an async ``chat`` method that accepts a list of
+    ``ChatMessage`` objects and a routing criteria (opaque) and returns a
+    ``GenerationResult``.
+    """
+
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        routing_criteria: object,
+    ) -> GenerationResult: ...
+
+
 @dataclass
 class ContextRecallScore:
     score: float
@@ -63,7 +80,7 @@ class ContextRecallScore:
 class ContextRecallMetric:
     """Async context recall scorer using an LLM judge."""
 
-    def __init__(self, llm_client: Any = None):
+    def __init__(self, llm_client: LLMClientProtocol | None = None) -> None:
         self.llm_client = llm_client
 
     async def score(
@@ -83,7 +100,9 @@ class ContextRecallMetric:
             )
 
         if self.llm_client is None:
-            logger.warning("No LLM client configured — returning default context recall score.")
+            logger.warning(
+                "No LLM client configured — returning default context recall score."
+            )
             return ContextRecallScore(
                 score=1.0,
                 key_facts=[],
@@ -91,7 +110,11 @@ class ContextRecallMetric:
                 raw_response="",
             )
 
-        user_msg = _USER_TEMPLATE.format(query=query[:2000], context=context[:8000], answer=answer[:3000])
+        user_msg = _USER_TEMPLATE.format(
+            query=query[:2000],
+            context=context[:8000],
+            answer=answer[:3000],
+        )
         messages = [
             ChatMessage(role="system", content=_SYSTEM_PROMPT),
             ChatMessage(role="user", content=user_msg),
@@ -101,10 +124,16 @@ class ContextRecallMetric:
             from providers.router import RoutingCriteria
 
             criteria = RoutingCriteria(task_type="evaluation")
-            result: GenerationResult = await self.llm_client.chat(messages, routing_criteria=criteria)
+            result: GenerationResult = await self.llm_client.chat(
+                messages,
+                routing_criteria=criteria,
+            )
             raw = result.content
         except Exception as exc:
-            logger.exception("LLM call failed for context_recall metric: %s", exc)
+            logger.exception(
+                "LLM call failed for context_recall metric: %s",
+                exc,
+            )
             return ContextRecallScore(
                 score=0.0,
                 key_facts=[],
@@ -128,7 +157,11 @@ class ContextRecallMetric:
                 raw_response=raw,
             )
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
-            logger.warning("Failed to parse context_recall JSON: %s | raw=%r", exc, raw[:200])
+            logger.warning(
+                "Failed to parse context_recall JSON: %s | raw=%r",
+                exc,
+                raw[:200],
+            )
             match = re.search(r'"score"\s*:\s*([0-9.]+)', raw)
             score = float(match.group(1)) if match else 0.0
             return ContextRecallScore(

@@ -1,29 +1,35 @@
-"""Hybrid parallel retriever combining dense, sparse, and metadata search."""
+
+"""
+Hybrid parallel retriever combining dense, sparse, and metadata search.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar, cast
 from uuid import UUID
 
+import asyncpg
+from db.pool import get_pool, pipeline_connection
 from opentelemetry import trace
 
-try:
-    from db.pool import get_pool, pipeline_connection
-except ImportError:
-    get_pool = None
-    pipeline_connection = None
 from pipelines.retrieval.query_processor import ProcessedQuery, QueryProcessor
+
+T = TypeVar("T")
 
 logger = logging.getLogger("neuroflow.retrieval.retriever")
 tracer = trace.get_tracer("neuroflow.retrieval")
 
+EmbeddingFunction = Callable[[list[str]], Awaitable[list[list[float]]]]
 
-async def _traced_search(name: str, operation):
+
+async def _traced_search(name: str, operation: Awaitable[T]) -> T:
     with tracer.start_as_current_span(name) as span:
         try:
             return await operation
@@ -47,43 +53,39 @@ class RetrievalResult:
     retrieval_method: str = "dense"
     rank: int | None = None
 
-    def clone(self, **kwargs) -> RetrievalResult:
+    def clone(self, **kwargs: object) -> RetrievalResult:
         """Create a copy with optional overridden fields."""
-        data = {
-            "chunk_id": self.chunk_id,
-            "document_id": self.document_id,
-            "content": self.content,
-            "score": self.score,
-            "source_type": self.source_type,
-            "filename": self.filename,
-            "page_number": self.page_number,
-            "metadata": dict(self.metadata),
-            "retrieval_method": self.retrieval_method,
-            "rank": self.rank,
-        }
-        data.update(kwargs)
-        return RetrievalResult(**data)
+        changes = dict(kwargs)
+        if "metadata" not in changes:
+            changes["metadata"] = dict(self.metadata)
+
+        return dataclasses.replace(self, **cast(Any, changes))
 
 
 def _extract_page_number(metadata: dict[str, Any]) -> int | None:
     """Extract page number from chunk or page metadata if available."""
     if not isinstance(metadata, dict):
         return None
+
     if "page_number" in metadata:
         try:
             return int(metadata["page_number"])
         except (ValueError, TypeError):
             pass
+
     pages = metadata.get("pages")
     if isinstance(pages, list) and pages:
         first = pages[0]
+
         if isinstance(first, dict) and "page_number" in first:
             try:
                 return int(first["page_number"])
             except (ValueError, TypeError):
                 pass
+
         elif isinstance(first, int):
             return first
+
     return None
 
 
@@ -92,23 +94,27 @@ class HybridRetriever:
 
     def __init__(
         self,
-        embed_fn: Callable[[list[str]], Any] | None = None,
+        embed_fn: EmbeddingFunction | None = None,
         query_processor: QueryProcessor | None = None,
-        pool: Any | None = None,
-    ):
+        pool: asyncpg.Pool | None = None,
+    ) -> None:
         """Initialize hybrid retriever with embedder, query processor, and connection pool."""
         self._embed_fn = embed_fn
         self.query_processor = query_processor or QueryProcessor()
         self.pool = pool
 
-    async def _get_embed_fn(self) -> Callable[[list[str]], Any]:
-        """Resolve or lazily create the embedding function using NeuroFlowClient."""
-        if self._embed_fn is not None:
-            return self._embed_fn
-        from providers.client import NeuroFlowClient
+    def set_embed_fn(self, embed_fn: EmbeddingFunction) -> None:
+        """Configure the embedding function used for dense retrieval."""
+        self._embed_fn = embed_fn
 
-        client = NeuroFlowClient(None)
-        self._embed_fn = client.embed
+    async def _get_embed_fn(self) -> EmbeddingFunction:
+        """Return the configured embedding function."""
+        if self._embed_fn is None:
+            raise RuntimeError(
+                "Embedding function is not configured. "
+                "Initialize HybridRetriever with a valid embed_fn."
+            )
+
         return self._embed_fn
 
     async def retrieve_parallel(
@@ -124,11 +130,12 @@ class HybridRetriever:
         """Run dense, sparse, and metadata-filtered retrieval concurrently.
 
         Returns:
-            Tuple of (dense_results, sparse_results, metadata_results)
+            Tuple of (dense_results, sparse_results, metadata_results).
         """
         if isinstance(query, str):
             processed = await self.query_processor.process(
-                query, explicit_filters=filters
+                query,
+                explicit_filters=filters,
             )
         else:
             processed = query
@@ -141,11 +148,12 @@ class HybridRetriever:
         sparse_limit = sparse_k if sparse_k is not None else k
         metadata_limit = max(dense_limit, sparse_limit)
 
-        # 1. Concurrently run sparse search and dense query preparation + search
         async def _run_dense() -> tuple[list[RetrievalResult], list[float] | None]:
             embed_fn = await self._get_embed_fn()
+
             with tracer.start_as_current_span("retrieval.query_embedding") as span:
                 span.set_attribute("embedding.query_count", len(queries_to_embed))
+
                 try:
                     query_vectors = await embed_fn(queries_to_embed)
                 except Exception as exc:
@@ -154,6 +162,7 @@ class HybridRetriever:
                     query_vectors = []
 
             primary_vec = query_vectors[0] if query_vectors else None
+
             dense_results = await _traced_search(
                 "retrieval.dense",
                 self._dense_search(
@@ -163,16 +172,24 @@ class HybridRetriever:
                     hnsw_ef_search=hnsw_ef_search,
                 ),
             )
+
             return dense_results, primary_vec
 
         sparse_task = _traced_search(
             "retrieval.sparse",
-            self._sparse_search(processed.query, k=sparse_limit, pipeline_id=pipeline_id),
+            self._sparse_search(
+                processed.query,
+                k=sparse_limit,
+                pipeline_id=pipeline_id,
+            ),
         )
+
         dense_task = _run_dense()
 
         (dense_res, primary_vector), sparse_res = await asyncio.gather(
-            dense_task, sparse_task, return_exceptions=False
+            dense_task,
+            sparse_task,
+            return_exceptions=False,
         )
 
         if active_filters:
@@ -203,22 +220,44 @@ class HybridRetriever:
         from pipelines.retrieval.fusion import reciprocal_rank_fusion
 
         dense_res, sparse_res, meta_res = await self.retrieve_parallel(
-            query=query, k=k, pipeline_id=pipeline_id, filters=filters
+            query=query,
+            k=k,
+            pipeline_id=pipeline_id,
+            filters=filters,
         )
 
         result_lists = [dense_res, sparse_res]
+
         if meta_res:
             result_lists.append(meta_res)
 
         fused = reciprocal_rank_fusion(result_lists, k=rrf_k)
+
         return fused[:k]
 
-    async def _acquire_connection(self, pipeline_id: UUID | None):
-        """Context manager yielding a database connection with tenant context."""
+    async def _acquire_connection(
+        self,
+        pipeline_id: UUID | None,
+    ) -> AbstractAsyncContextManager[asyncpg.Connection]:
+        """Return a context manager yielding a connection with tenant context."""
         if pipeline_id is not None:
-            return pipeline_connection(pipeline_id)
-        pool = self.pool or get_pool()
-        return pool.acquire()
+            if pipeline_connection is None:
+                raise RuntimeError("Database pool not available.")
+
+            return cast(
+                AbstractAsyncContextManager[asyncpg.Connection],
+                pipeline_connection(pipeline_id),
+            )
+
+        pool = self.pool or (get_pool() if get_pool is not None else None)
+
+        if pool is None:
+            raise RuntimeError("Database pool not available.")
+
+        return cast(
+            AbstractAsyncContextManager[asyncpg.Connection],
+            pool.acquire(),
+        )
 
     async def _dense_search(
         self,
@@ -227,17 +266,18 @@ class HybridRetriever:
         pipeline_id: UUID | None,
         hnsw_ef_search: int | None = None,
     ) -> list[RetrievalResult]:
-        """Search chunks using pgvector cosine distance `<=>` for all query vectors."""
+        """Search chunks using pgvector cosine distance for all query vectors."""
         if not query_vectors:
             return []
 
         best_by_chunk: dict[str, RetrievalResult] = {}
 
-        # Deduplicate identical vectors to avoid redundant pgvector queries
         unique_vectors: list[list[float]] = []
         seen_keys: set[tuple[float, ...]] = set()
+
         for vec in query_vectors:
             key = tuple(round(v, 6) for v in vec)
+
             if key not in seen_keys:
                 seen_keys.add(key)
                 unique_vectors.append(vec)
@@ -248,8 +288,10 @@ class HybridRetriever:
                     "SELECT set_config('hnsw.ef_search', $1, true)",
                     str(hnsw_ef_search),
                 )
+
             for vec in unique_vectors:
                 vec_str = "[" + ",".join(str(v) for v in vec) + "]"
+
                 rows = await conn.fetch(
                     """
                     SELECT c.id AS chunk_id, c.document_id, c.content, c.chunk_index,
@@ -269,6 +311,7 @@ class HybridRetriever:
                     cid = str(row["chunk_id"])
                     score = float(row["score"])
                     raw_meta = row["metadata"]
+
                     meta = (
                         json.loads(raw_meta)
                         if isinstance(raw_meta, str)
@@ -288,12 +331,14 @@ class HybridRetriever:
                             retrieval_method="dense",
                         )
 
-        # Sort descending by score and assign ranks
         sorted_results = sorted(
-            best_by_chunk.values(), key=lambda r: r.score, reverse=True
+            best_by_chunk.values(),
+            key=lambda result: result.score,
+            reverse=True,
         )[:k]
-        for idx, res in enumerate(sorted_results):
-            res.rank = idx + 1
+
+        for idx, result in enumerate(sorted_results):
+            result.rank = idx + 1
 
         return sorted_results
 
@@ -305,6 +350,7 @@ class HybridRetriever:
     ) -> list[RetrievalResult]:
         """Search chunks using PostgreSQL full-text search with cover-density ranking."""
         trimmed = query.strip()
+
         if not trimmed:
             return []
 
@@ -313,7 +359,10 @@ class HybridRetriever:
                 """
                 SELECT c.id AS chunk_id, c.document_id, c.content, c.chunk_index,
                        c.token_count, c.metadata, d.filename, d.source_type,
-                       ts_rank_cd(to_tsvector('english', c.content), plainto_tsquery('english', $1)) AS score
+                       ts_rank_cd(
+                           to_tsvector('english', c.content),
+                           plainto_tsquery('english', $1)
+                       ) AS score
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE to_tsvector('english', c.content) @@ plainto_tsquery('english', $1)
@@ -325,13 +374,16 @@ class HybridRetriever:
             )
 
             results: list[RetrievalResult] = []
+
             for idx, row in enumerate(rows):
                 raw_meta = row["metadata"]
+
                 meta = (
                     json.loads(raw_meta)
                     if isinstance(raw_meta, str)
                     else raw_meta or {}
                 )
+
                 results.append(
                     RetrievalResult(
                         chunk_id=str(row["chunk_id"]),
@@ -357,7 +409,10 @@ class HybridRetriever:
         pipeline_id: UUID | None,
         hnsw_ef_search: int | None = None,
     ) -> list[RetrievalResult]:
-        """Search chunks matching JSONB metadata filters, optionally ordered by vector similarity."""
+        """Search chunks matching JSONB metadata filters.
+
+        Optionally order results by vector similarity.
+        """
         if not filters:
             return []
 
@@ -369,8 +424,10 @@ class HybridRetriever:
                     "SELECT set_config('hnsw.ef_search', $1, true)",
                     str(hnsw_ef_search),
                 )
+
             if query_vector:
                 vec_str = "[" + ",".join(str(v) for v in query_vector) + "]"
+
                 rows = await conn.fetch(
                     """
                     SELECT c.id AS chunk_id, c.document_id, c.content, c.chunk_index,
@@ -403,27 +460,30 @@ class HybridRetriever:
                     k,
                 )
 
-            results: list[RetrievalResult] = []
-            for idx, row in enumerate(rows):
-                raw_meta = row["metadata"]
-                meta = (
-                    json.loads(raw_meta)
-                    if isinstance(raw_meta, str)
-                    else raw_meta or {}
+        results: list[RetrievalResult] = []
+
+        for idx, row in enumerate(rows):
+            raw_meta = row["metadata"]
+
+            meta = (
+                json.loads(raw_meta)
+                if isinstance(raw_meta, str)
+                else raw_meta or {}
+            )
+
+            results.append(
+                RetrievalResult(
+                    chunk_id=str(row["chunk_id"]),
+                    document_id=str(row["document_id"]),
+                    content=row["content"],
+                    score=float(row["score"]),
+                    source_type=row["source_type"] or "text",
+                    filename=row["filename"],
+                    page_number=_extract_page_number(meta),
+                    metadata=meta,
+                    retrieval_method="metadata",
+                    rank=idx + 1,
                 )
-                results.append(
-                    RetrievalResult(
-                        chunk_id=str(row["chunk_id"]),
-                        document_id=str(row["document_id"]),
-                        content=row["content"],
-                        score=float(row["score"]),
-                        source_type=row["source_type"] or "text",
-                        filename=row["filename"],
-                        page_number=_extract_page_number(meta),
-                        metadata=meta,
-                        retrieval_method="metadata",
-                        rank=idx + 1,
-                    )
-                )
+            )
 
         return results

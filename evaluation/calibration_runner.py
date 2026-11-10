@@ -1,4 +1,5 @@
-"""Repeatable runner for calibration evaluation computing Pearson correlation against human labels."""
+
+"""Repeatable runner for calibration evaluation against human labels."""
 
 from __future__ import annotations
 
@@ -6,7 +7,7 @@ import asyncio
 import json
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -33,7 +34,7 @@ def calculate_pearson_correlation(x: list[float], y: list[float]) -> float | Non
     var_y = sum((yi - mean_y) ** 2 for yi in y)
 
     if var_x <= 0.0 or var_y <= 0.0:
-        # Zero variance: undefined correlation
+        # Zero variance: undefined correlation.
         return None
 
     denom = math.sqrt(var_x * var_y)
@@ -47,31 +48,34 @@ def calculate_mae(x: list[float], y: list[float]) -> float | None:
     """Compute Mean Absolute Error."""
     if not x or len(x) != len(y):
         return None
+
     return round(sum(abs(xi - yi) for xi, yi in zip(x, y)) / len(x), 4)
 
 
 class CalibrationRunner:
-    """Executes evaluation over the 30-sample benchmark and produces calibration metrics."""
+    """Execute the benchmark and calculate calibration metrics."""
 
     def __init__(
         self,
         dataset_path: Path | str | None = None,
         output_path: Path | str | None = None,
         judge: EvaluationJudge | None = None,
-    ):
+    ) -> None:
         base_dir = Path(__file__).resolve().parent
-        self.dataset_path = Path(dataset_path or (base_dir / "calibration" / "annotated_set.json"))
+        self.dataset_path = Path(
+            dataset_path or (base_dir / "calibration" / "annotated_set.json")
+        )
         self.output_path = Path(output_path or (base_dir / "calibration_results.json"))
         self.judge = judge
 
     async def _get_default_judge(self) -> EvaluationJudge | None:
-        """Attempt to initialize EvaluationJudge with redis and neuroflow client."""
+        """Attempt to initialize EvaluationJudge with Redis and NeuroFlow client."""
         try:
-            import redis.asyncio as aioredis
             from config import settings
             from providers.client import NeuroFlowClient
+            from redis.asyncio import Redis
 
-            redis_client = aioredis.from_url(
+            redis_client = Redis.from_url(
                 settings.redis_url,
                 decode_responses=True,
                 socket_connect_timeout=3,
@@ -79,13 +83,28 @@ class CalibrationRunner:
             client = NeuroFlowClient(redis_client)
             return EvaluationJudge(llm_client=client)
         except Exception as exc:
-            logger.warning("Could not instantiate default live EvaluationJudge: %s", exc)
+            logger.warning(
+                "Could not instantiate default live EvaluationJudge: %s",
+                exc,
+            )
             return None
+
+    async def _write_results(self, results: dict[str, Any]) -> None:
+        """Write calibration results without blocking the event loop."""
+        content = json.dumps(results, indent=2)
+        await asyncio.to_thread(
+            self.output_path.write_text,
+            content,
+            encoding="utf-8",
+        )
 
     async def run(self) -> dict[str, Any]:
         """Run evaluation on the annotated dataset and compute Pearson correlation."""
-        with open(self.dataset_path, "r", encoding="utf-8") as f:
-            dataset: list[dict[str, Any]] = json.load(f)
+        dataset_content = await asyncio.to_thread(
+            self.dataset_path.read_text,
+            encoding="utf-8",
+        )
+        dataset: list[dict[str, Any]] = json.loads(dataset_content)
 
         judge = self.judge
         if judge is None:
@@ -93,11 +112,14 @@ class CalibrationRunner:
 
         if judge is None or judge.llm_client is None:
             results = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "status": "failed",
                 "sample_count": len(dataset),
                 "metric_weights": DEFAULT_WEIGHTS.copy(),
-                "error": "No LLM judge client or provider available to perform real calibration.",
+                "error": (
+                    "No LLM judge client or provider available "
+                    "to perform real calibration."
+                ),
                 "provenance": {
                     "dataset_path": str(self.dataset_path),
                     "evaluator": "None",
@@ -107,18 +129,19 @@ class CalibrationRunner:
                 "overall_score_pearson_correlation": None,
                 "is_calibrated": False,
             }
-            with open(self.output_path, "w", encoding="utf-8") as out:
-                json.dump(results, out, indent=2)
+            await self._write_results(results)
             return results
 
         human_faithfulness = [
-            float(item.get("human_score", item.get("human_faithfulness", item.get("expected_faithfulness", 0.0))))
+            float(
+                item.get(
+                    "human_score",
+                    item.get("human_faithfulness", item.get("expected_faithfulness", 0.0)),
+                )
+            )
             for item in dataset
         ]
-        human_overall = [
-            float(item.get("ground_truth_overall", 0.0))
-            for item in dataset
-        ]
+        human_overall = [float(item.get("ground_truth_overall", 0.0)) for item in dataset]
 
         pred_faith: list[float] = []
         pred_rel: list[float] = []
@@ -149,7 +172,7 @@ class CalibrationRunner:
                 r_val = report.context_recall
                 o_val = report.overall_score
 
-                # Check if the evaluation metric failed due to LLM provider error
+                # Check whether evaluation failed due to an LLM provider error.
                 faith_reason = report.details.get("faithfulness", {}).get("reasoning", "")
                 if "LLM call failed" in faith_reason:
                     execution_error = faith_reason
@@ -161,26 +184,37 @@ class CalibrationRunner:
                 pred_rec.append(r_val)
                 pred_overall.append(o_val)
 
-                predictions.append({
-                    "id": item["id"],
-                    "query": item["query"],
-                    "human_faithfulness": item.get("human_score", item.get("human_faithfulness")),
-                    "predicted_faithfulness": f_val,
-                    "predicted_overall": o_val,
-                })
+                predictions.append(
+                    {
+                        "id": item["id"],
+                        "query": item["query"],
+                        "human_faithfulness": item.get(
+                            "human_score",
+                            item.get("human_faithfulness"),
+                        ),
+                        "predicted_faithfulness": f_val,
+                        "predicted_overall": o_val,
+                    }
+                )
             except Exception as exc:
-                logger.exception("Live evaluation failed on item %s: %s", item.get("id"), exc)
+                logger.exception(
+                    "Live evaluation failed on item %s: %s",
+                    item.get("id"),
+                    exc,
+                )
                 execution_error = str(exc)
                 break
 
         if execution_error or len(pred_faith) != len(dataset):
             results = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "status": "failed",
                 "sample_count": len(dataset),
                 "evaluated_count": len(pred_faith),
                 "metric_weights": DEFAULT_WEIGHTS.copy(),
-                "error": f"LLM evaluator call failed during calibration: {execution_error}",
+                "error": (
+                    f"LLM evaluator call failed during calibration: {execution_error}"
+                ),
                 "provenance": {
                     "dataset_path": str(self.dataset_path),
                     "evaluator_model": judge_model_used,
@@ -190,8 +224,7 @@ class CalibrationRunner:
                 "overall_score_pearson_correlation": None,
                 "is_calibrated": False,
             }
-            with open(self.output_path, "w", encoding="utf-8") as out:
-                json.dump(results, out, indent=2)
+            await self._write_results(results)
             return results
 
         faith_corr = calculate_pearson_correlation(human_faithfulness, pred_faith)
@@ -200,7 +233,7 @@ class CalibrationRunner:
         overall_mae = calculate_mae(human_overall, pred_overall)
 
         results = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "status": "completed",
             "sample_count": len(dataset),
             "metric_weights": DEFAULT_WEIGHTS.copy(),
@@ -220,13 +253,11 @@ class CalibrationRunner:
             "predictions_sample": predictions[:5],
         }
 
-        with open(self.output_path, "w", encoding="utf-8") as out:
-            json.dump(results, out, indent=2)
-
+        await self._write_results(results)
         return results
 
 
-async def main():
+async def main() -> None:
     runner = CalibrationRunner()
     results = await runner.run()
     print("Calibration runner finished:")

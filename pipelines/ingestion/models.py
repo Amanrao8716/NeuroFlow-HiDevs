@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 ContentType = Literal["text", "table", "image", "metadata"]
 
 

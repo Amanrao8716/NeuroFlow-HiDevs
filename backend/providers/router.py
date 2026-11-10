@@ -1,5 +1,10 @@
 import json
+import re
+from collections.abc import Awaitable
 from dataclasses import dataclass
+from typing import cast
+
+from redis.asyncio import Redis
 
 from .base import BaseLLMProvider
 
@@ -17,45 +22,57 @@ class RoutingCriteria:
 class ModelRouter:
     """Select a registered model that satisfies routing constraints."""
 
-    def __init__(self, redis_client: object, providers: dict[str, BaseLLMProvider]) -> None:
+    def __init__(
+        self,
+        redis_client: Redis,
+        providers: dict[str, BaseLLMProvider],
+    ) -> None:
         self.redis = redis_client
         self.providers = providers
 
     async def _get_models(self) -> list[dict[str, object]]:
-        """Read model registrations from Redis."""
-        raw_models = await self.redis.hgetall("router:models")
-        models = []
+        """Read and validate model registrations from Redis."""
+        raw_models = await cast(
+            Awaitable[dict[str | bytes, str | bytes]],
+            self.redis.hgetall("router:models"),
+        )
+        models: list[dict[str, object]] = []
 
-        for name, raw_config in raw_models.items():
-            if isinstance(name, bytes):
-                name = name.decode()
-
-            if isinstance(raw_config, bytes):
-                raw_config = raw_config.decode()
+        for raw_name, raw_config in raw_models.items():
+            name = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else raw_name
+            config_text = (
+                raw_config.decode("utf-8") if isinstance(raw_config, bytes) else raw_config
+            )
 
             try:
-                config = json.loads(raw_config)
-            except Exception:
-                # Fallback in case raw_config had unquoted keys like {name:gpt-4o}
-                import re
-
-                fixed = re.sub(r"([{,])\s*([a-zA-Z0-9_]+)\s*:", r'\1"\2":', raw_config)
-                # quote unquoted string values that aren't true/false/null/numbers
+                config = json.loads(config_text)
+            except (json.JSONDecodeError, TypeError):
+                fixed = re.sub(
+                    r"([{,])\s*([a-zA-Z0-9_]+)\s*:",
+                    r'\1"\2":',
+                    config_text,
+                )
                 fixed = re.sub(
                     r":\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*([,}])",
-                    lambda m: (
-                        f':"{m.group(1)}"{m.group(2)}'
-                        if m.group(1) not in ("true", "false", "null")
-                        else m.group(0)
+                    lambda match: (
+                        f':"{match.group(1)}"{match.group(2)}'
+                        if match.group(1) not in ("true", "false", "null")
+                        else match.group(0)
                     ),
                     fixed,
                 )
+
                 try:
                     config = json.loads(fixed)
-                except Exception:
+                except (json.JSONDecodeError, TypeError):
                     config = {"name": name}
-            config.setdefault("name", name)
-            models.append(config)
+
+            if not isinstance(config, dict):
+                config = {"name": name}
+
+            model: dict[str, object] = {str(key): value for key, value in config.items()}
+            model.setdefault("name", name)
+            models.append(model)
 
         return models
 
@@ -63,41 +80,55 @@ class ModelRouter:
         criteria = criteria or RoutingCriteria()
         models = await self._get_models()
 
-        # Evaluation must use a registered judge with an available provider.
         if criteria.task_type == "evaluation":
             for model in models:
-                name = model["name"]
+                name = model.get("name")
                 if (
                     model.get("role") == "judge"
                     and not model.get("fine_tuned", False)
+                    and isinstance(name, str)
                     and name in self.providers
                 ):
                     return name
 
             raise ValueError("No eligible judge model is registered.")
 
-        candidates = []
+        candidates: list[dict[str, object]] = []
 
         for model in models:
-            name = model["name"]
+            name = model.get("name")
 
-            if name not in self.providers:
+            if not isinstance(name, str) or name not in self.providers:
                 continue
 
             if criteria.require_vision and not model.get("vision", False):
                 continue
 
-            if criteria.require_long_context and model.get("context_window", 0) <= 100000:
-                continue
+            context_window = model.get("context_window", 0)
+            if criteria.require_long_context:
+                if (
+                    isinstance(context_window, bool)
+                    or not isinstance(context_window, (int, float))
+                    or context_window <= 100000
+                ):
+                    continue
 
             if criteria.max_cost_per_call is not None:
                 estimated_cost = model.get("estimated_cost_per_call")
-                if estimated_cost is None or estimated_cost > criteria.max_cost_per_call:
+                if (
+                    isinstance(estimated_cost, bool)
+                    or not isinstance(estimated_cost, (int, float))
+                    or estimated_cost > criteria.max_cost_per_call
+                ):
                     continue
 
             if criteria.latency_budget_ms is not None:
                 estimated_latency = model.get("estimated_latency_ms")
-                if estimated_latency is None or estimated_latency > criteria.latency_budget_ms:
+                if (
+                    isinstance(estimated_latency, bool)
+                    or not isinstance(estimated_latency, (int, float))
+                    or estimated_latency > criteria.latency_budget_ms
+                ):
                     continue
 
             candidates.append(model)
@@ -110,7 +141,18 @@ class ModelRouter:
             if fine_tuned:
                 candidates = fine_tuned
 
-        # Prefer the lowest estimated cost among eligible models.
-        candidates.sort(key=lambda model: model.get("estimated_cost_per_call", float("inf")))
+        def cost_sort_key(model: dict[str, object]) -> float:
+            value = model.get("estimated_cost_per_call")
 
-        return candidates[0]["name"]
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+
+            return float("inf")
+
+        candidates.sort(key=cost_sort_key)
+
+        selected_name = candidates[0].get("name")
+        if not isinstance(selected_name, str):
+            raise ValueError("Selected model has an invalid name.")
+
+        return selected_name

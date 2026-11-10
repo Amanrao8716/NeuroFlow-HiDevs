@@ -1,14 +1,17 @@
+
 """RAG Generation Orchestrator, Stream Generator, and Pipeline Run Logging."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from opentelemetry import trace
@@ -17,8 +20,6 @@ try:
     from db.pool import pipeline_connection
 except ImportError:
     pipeline_connection = None
-import hashlib
-import os
 
 from observability.tracing import inject_trace_context
 from providers.base import ChatMessage
@@ -37,6 +38,28 @@ from pipelines.retrieval.context_assembler import TokenCounter
 
 logger = logging.getLogger("neuroflow.generation")
 tracer = trace.get_tracer("neuroflow.generation")
+
+
+class RedisClient(Protocol):
+    """Interface for asynchronous Redis operations."""
+
+    async def get(self, name: str) -> bytes | str | None: ...
+
+    async def set(
+        self,
+        name: str,
+        value: str,
+        *,
+        ex: int | None = None,
+    ) -> bool | None: ...
+
+    async def rpush(self, name: str, *values: str) -> int: ...
+
+
+class PipelineConfig(Protocol):
+    """Interface for configuration objects supporting model_dump."""
+
+    def model_dump(self) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -85,8 +108,9 @@ def _reconstruct_parsed_citations(data: list[dict[str, Any]]) -> ParsedCitations
     citations = []
     invalid_citations = []
     cited_chunk_ids = []
+
     for item in data:
-        c = Citation(
+        citation = Citation(
             reference=item.get("reference", ""),
             source_number=item.get("source_number", 0),
             chunk_id=item.get("chunk_id"),
@@ -96,12 +120,14 @@ def _reconstruct_parsed_citations(data: list[dict[str, Any]]) -> ParsedCitations
             is_valid=item.get("is_valid", True),
             error=item.get("error"),
         )
-        if c.is_valid:
-            citations.append(c)
-            if c.chunk_id:
-                cited_chunk_ids.append(c.chunk_id)
+
+        if citation.is_valid:
+            citations.append(citation)
+            if citation.chunk_id:
+                cited_chunk_ids.append(citation.chunk_id)
         else:
-            invalid_citations.append(c)
+            invalid_citations.append(citation)
+
     return ParsedCitations(
         citations=citations,
         invalid_citations=invalid_citations,
@@ -110,14 +136,11 @@ def _reconstruct_parsed_citations(data: list[dict[str, Any]]) -> ParsedCitations
 
 
 class GenerationPipeline:
-    """Orchestrates query processing, hybrid retrieval, prompt assembly, streaming LLM generation,
-
-    citation tracking, and persistence to the pipeline_runs table.
-    """
+    """Orchestrate retrieval, prompt assembly, generation, and run persistence."""
 
     def __init__(
         self,
-        redis_client: Any = None,
+        redis_client: RedisClient | None = None,
         query_processor: QueryProcessor | None = None,
         retriever: HybridRetriever | None = None,
         reranker: CrossEncoderReranker | None = None,
@@ -127,10 +150,12 @@ class GenerationPipeline:
         token_counter: TokenCounter | None = None,
         llm_client: NeuroFlowClient | None = None,
         query_cache_ttl_seconds: int | None = None,
-    ):
+    ) -> None:
         self.redis = redis_client
         self.processor = query_processor or QueryProcessor()
-        self.client = llm_client or (NeuroFlowClient(redis_client) if redis_client else None)
+        self.client = llm_client or (
+            NeuroFlowClient(redis_client) if redis_client else None
+        )
         self.retriever = retriever or HybridRetriever(
             embed_fn=getattr(self.client, "embed", None) if self.client else None,
             query_processor=self.processor,
@@ -140,13 +165,16 @@ class GenerationPipeline:
         self.prompt_builder = prompt_builder or PromptBuilder()
         self.citation_tracker = citation_tracker or CitationTracker()
         self.token_counter = token_counter or TokenCounter()
+
         configured_cache_ttl = (
             query_cache_ttl_seconds
             if query_cache_ttl_seconds is not None
             else int(os.getenv("QUERY_CACHE_TTL_SECONDS", "1800"))
         )
+
         if configured_cache_ttl < 0:
             raise ValueError("query_cache_ttl_seconds cannot be negative")
+
         self.query_cache_ttl_seconds = configured_cache_ttl
 
     async def _load_pipeline_config(
@@ -154,9 +182,10 @@ class GenerationPipeline:
         pipeline_id: UUID,
         version: int | None = None,
     ) -> tuple[int, dict[str, Any] | None]:
-        """Load pipeline configuration for a specific version or latest active version."""
+        """Load pipeline configuration for a specific or latest version."""
         if pipeline_connection is None:
             return (1, None)
+
         try:
             async with pipeline_connection(pipeline_id) as conn:
                 if version is not None:
@@ -178,12 +207,23 @@ class GenerationPipeline:
                         """,
                         pipeline_id,
                     )
+
                 if row:
                     raw_cfg = row["config"]
-                    cfg_dict = json.loads(raw_cfg) if isinstance(raw_cfg, str) else dict(raw_cfg)
+                    cfg_dict = (
+                        json.loads(raw_cfg)
+                        if isinstance(raw_cfg, str)
+                        else dict(raw_cfg)
+                    )
                     return (row["version"], cfg_dict)
+
         except Exception as exc:
-            logger.debug("Could not load config for pipeline %s: %s", pipeline_id, exc)
+            logger.debug(
+                "Could not load config for pipeline %s: %s",
+                pipeline_id,
+                exc,
+            )
+
         return (1, None)
 
     async def _create_pipeline_run(
@@ -197,7 +237,7 @@ class GenerationPipeline:
         retrieval_latency_ms: int | None = None,
         execution_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Persist a new pipeline_runs record BEFORE the LLM call with status='running'."""
+        """Persist a pipeline run before the LLM call."""
         try:
             async with pipeline_connection(pipeline_id) as conn:
                 await conn.execute(
@@ -226,8 +266,11 @@ class GenerationPipeline:
                     json.dumps(execution_metadata or {}),
                 )
         except Exception as exc:
-            logger.exception("Failed to create pipeline_run %s before LLM call: %s", run_id, exc)
-            # Re-raise so pipeline run is strictly logged
+            logger.exception(
+                "Failed to create pipeline_run %s before LLM call: %s",
+                run_id,
+                exc,
+            )
             raise
 
     async def _update_pipeline_run_success(
@@ -242,7 +285,7 @@ class GenerationPipeline:
         model_used: str,
         cost_usd: float | None = None,
     ) -> None:
-        """Update the pipeline_runs record with completed generation and metrics."""
+        """Update a pipeline run with completed generation and metrics."""
         try:
             async with pipeline_connection(pipeline_id) as conn:
                 await conn.execute(
@@ -269,7 +312,11 @@ class GenerationPipeline:
                     pipeline_id,
                 )
         except Exception as exc:
-            logger.exception("Failed to update pipeline_run %s on success: %s", run_id, exc)
+            logger.exception(
+                "Failed to update pipeline_run %s on success: %s",
+                run_id,
+                exc,
+            )
 
     async def _update_pipeline_run_failure(
         self,
@@ -278,9 +325,10 @@ class GenerationPipeline:
         error_message: str,
         latency_ms: int = 0,
     ) -> None:
-        """Update the pipeline_runs record with failed status and safe error message."""
+        """Update a pipeline run with failed status and a safe error message."""
         try:
             safe_error = error_message[:1000]
+
             async with pipeline_connection(pipeline_id) as conn:
                 await conn.execute(
                     """
@@ -296,36 +344,46 @@ class GenerationPipeline:
                     pipeline_id,
                 )
         except Exception as exc:
-            logger.exception("Failed to update pipeline_run %s on failure: %s", run_id, exc)
+            logger.exception(
+                "Failed to update pipeline_run %s on failure: %s",
+                run_id,
+                exc,
+            )
 
     async def _enqueue_eval_job(
         self,
         run_id: str,
         pipeline_id: str,
     ) -> None:
-        """Enqueue Task 37 evaluation job asynchronously into Redis/arq queue."""
+        """Enqueue an evaluation job asynchronously into Redis/arq."""
         if not self.redis:
             logger.debug("Redis client not available, skipping eval job enqueue.")
             return
 
         try:
-            # arq job enqueue convention or Redis queue
-            payload = json.dumps({
-                "job": "evaluate_pipeline_run",
-                "run_id": run_id,
-                "pipeline_id": pipeline_id,
-                "enqueued_at": time.time(),
-                "trace_context": inject_trace_context(),
-            })
-            # Push into evaluation queue with non-blocking call
+            payload = json.dumps(
+                {
+                    "job": "evaluate_pipeline_run",
+                    "run_id": run_id,
+                    "pipeline_id": pipeline_id,
+                    "enqueued_at": time.time(),
+                    "trace_context": inject_trace_context(),
+                }
+            )
+
             await asyncio.wait_for(
                 self.redis.rpush("neuroflow:queue:evaluations", payload),
                 timeout=2.0,
             )
+
             logger.info("Enqueued evaluation job for run %s", run_id)
+
         except Exception as exc:
-            # Queue failure must not fail generation
-            logger.warning("Failed to enqueue evaluation job for run %s: %s", run_id, exc)
+            logger.warning(
+                "Failed to enqueue evaluation job for run %s: %s",
+                run_id,
+                exc,
+            )
 
     async def generate(
         self,
@@ -337,26 +395,30 @@ class GenerationPipeline:
         rerank: bool = True,
         model_name: str | None = None,
         pipeline_version: int | None = None,
-        config: Any = None,
+        config: Mapping[str, Any] | PipelineConfig | None = None,
         temperature: float | None = None,
     ) -> GenerationResult:
-        """Execute complete non-streaming generation pipeline with configuration and versioning."""
+        """Execute the non-streaming generation pipeline."""
         target_run_id = run_id or uuid4()
         start_time = time.perf_counter()
 
-        # Load pipeline configuration if not passed directly
         cfg_dict: dict[str, Any] | None = None
         effective_version = pipeline_version
 
-        if config is not None:
-            cfg_dict = config.model_dump() if hasattr(config, "model_dump") else dict(config)
+        if isinstance(config, Mapping):
+            cfg_dict = dict(config)
+        elif config is not None:
+            cfg_dict = config.model_dump()
         else:
-            ver, loaded_cfg = await self._load_pipeline_config(pipeline_id, pipeline_version)
+            ver, loaded_cfg = await self._load_pipeline_config(
+                pipeline_id,
+                pipeline_version,
+            )
             cfg_dict = loaded_cfg
+
             if effective_version is None:
                 effective_version = ver
 
-        # Map configuration settings
         if cfg_dict:
             retrieval_cfg = cfg_dict.get("retrieval", {})
             gen_cfg = cfg_dict.get("generation", {})
@@ -366,27 +428,47 @@ class GenerationPipeline:
             effective_sparse_k = retrieval_cfg.get("sparse_k", top_k * 2)
             effective_top_k = retrieval_cfg.get("top_k_after_rerank", top_k)
             effective_rrf_k = retrieval_cfg.get("rrf_k", 60)
+
             rrf_weights = {
                 "dense": retrieval_cfg.get("dense_rrf_weight", 0.6),
                 "sparse": retrieval_cfg.get("sparse_rrf_weight", 0.4),
                 "metadata": retrieval_cfg.get("metadata_rrf_weight", 0.4),
             }
+
             hnsw_ef_search = retrieval_cfg.get("hnsw_ef_search", 40)
             rerank_candidate_k = retrieval_cfg.get("rerank_candidate_k", 40)
-            reranker_type = retrieval_cfg.get("reranker", "cross-encoder" if rerank else "none")
+            reranker_type = retrieval_cfg.get(
+                "reranker",
+                "cross-encoder" if rerank else "none",
+            )
             apply_expansion = retrieval_cfg.get("query_expansion", True)
             apply_filters = retrieval_cfg.get("metadata_filters_enabled", True)
 
-            effective_max_tokens = gen_cfg.get("max_context_tokens", max_context_tokens)
-            effective_model = model_name or gen_cfg.get("model_routing", "gpt-4o-mini")
-            effective_temp = temperature if temperature is not None else gen_cfg.get("temperature", 0.7)
+            effective_max_tokens = gen_cfg.get(
+                "max_context_tokens",
+                max_context_tokens,
+            )
+            effective_model = model_name or gen_cfg.get(
+                "model_routing",
+                "gpt-4o-mini",
+            )
+            effective_temp = (
+                temperature
+                if temperature is not None
+                else gen_cfg.get("temperature", 0.7)
+            )
             auto_evaluate = eval_cfg.get("auto_evaluate", True)
+
         else:
             effective_dense_k = top_k * 2
             effective_sparse_k = top_k * 2
             effective_top_k = top_k
             effective_rrf_k = 60
-            rrf_weights = {"dense": 0.6, "sparse": 0.4, "metadata": 0.4}
+            rrf_weights = {
+                "dense": 0.6,
+                "sparse": 0.4,
+                "metadata": 0.4,
+            }
             hnsw_ef_search = 40
             rerank_candidate_k = 40
             reranker_type = "cross-encoder" if rerank else "none"
@@ -397,15 +479,25 @@ class GenerationPipeline:
             effective_temp = temperature if temperature is not None else 0.7
             auto_evaluate = True
 
-        # Check full-query cache
-        query_cache_enabled = gen_cfg.get("query_cache_enabled", True) if cfg_dict else True
+        query_cache_enabled = (
+            gen_cfg.get("query_cache_enabled", True) if cfg_dict else True
+        )
         effective_cache_ttl = (
-            gen_cfg.get("query_cache_ttl_seconds", self.query_cache_ttl_seconds)
+            gen_cfg.get(
+                "query_cache_ttl_seconds",
+                self.query_cache_ttl_seconds,
+            )
             if cfg_dict
             else self.query_cache_ttl_seconds
         )
+
         cache_key = None
-        if self.redis is not None and query_cache_enabled and effective_cache_ttl > 0:
+
+        if (
+            self.redis is not None
+            and query_cache_enabled
+            and effective_cache_ttl > 0
+        ):
             cache_payload = json.dumps(
                 {
                     "pipeline_id": str(pipeline_id),
@@ -424,9 +516,15 @@ class GenerationPipeline:
                 },
                 sort_keys=True,
             )
-            cache_key = "query_cache:v1:" + hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
+
+            cache_key = (
+                "query_cache:v1:"
+                + hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
+            )
+
             try:
                 cached_bytes = await self.redis.get(cache_key)
+
                 if cached_bytes:
                     raw_cached = (
                         cached_bytes.decode("utf-8")
@@ -434,11 +532,19 @@ class GenerationPipeline:
                         else cached_bytes
                     )
                     cached_data = json.loads(raw_cached)
-                    cached_latency = int((time.perf_counter() - start_time) * 1000)
+                    cached_latency = int(
+                        (time.perf_counter() - start_time) * 1000
+                    )
                     reconstructed_citations = _reconstruct_parsed_citations(
                         cached_data.get("citations", [])
                     )
-                    logger.info("Query cache hit for pipeline %s, run %s", pipeline_id, target_run_id)
+
+                    logger.info(
+                        "Query cache hit for pipeline %s, run %s",
+                        pipeline_id,
+                        target_run_id,
+                    )
+
                     return GenerationResult(
                         run_id=str(target_run_id),
                         query=query,
@@ -454,42 +560,53 @@ class GenerationPipeline:
                         cost_usd=cached_data.get("cost_usd"),
                         status="completed",
                         pipeline_version=effective_version,
-                        retrieval_latency_ms=cached_data.get("retrieval_latency_ms", 0),
+                        retrieval_latency_ms=cached_data.get(
+                            "retrieval_latency_ms",
+                            0,
+                        ),
                     )
+
             except Exception as cache_err:
-                logger.debug("Query cache read failed; proceeding with generation: %s", cache_err)
+                logger.debug(
+                    "Query cache read failed; proceeding with generation: %s",
+                    cache_err,
+                )
 
         retrieval_start = time.perf_counter()
 
-        # 1. Query Processing
         with tracer.start_as_current_span("query.processing"):
-            processed = await self.processor.process(query, expand=apply_expansion)
-
-        # 2. Parallel Multi-Method Retrieval
-        filters_to_apply = processed.filters if apply_filters else None
-        retrieval_k = max(effective_dense_k, effective_sparse_k)
-        with tracer.start_as_current_span("retrieval.hybrid"):
-            dense_res, sparse_res, meta_res = await self.retriever.retrieve_parallel(
-                query=processed,
-                k=retrieval_k,
-                pipeline_id=pipeline_id,
-                filters=filters_to_apply,
-                dense_k=effective_dense_k,
-                sparse_k=effective_sparse_k,
-                hnsw_ef_search=hnsw_ef_search,
+            processed = await self.processor.process(
+                query,
+                expand=apply_expansion,
             )
 
-        # 3. Reciprocal Rank Fusion
+        filters_to_apply = processed.filters if apply_filters else None
+        retrieval_k = max(effective_dense_k, effective_sparse_k)
+
+        with tracer.start_as_current_span("retrieval.hybrid"):
+            dense_res, sparse_res, meta_res = (
+                await self.retriever.retrieve_parallel(
+                    query=processed,
+                    k=retrieval_k,
+                    pipeline_id=pipeline_id,
+                    filters=filters_to_apply,
+                    dense_k=effective_dense_k,
+                    sparse_k=effective_sparse_k,
+                    hnsw_ef_search=hnsw_ef_search,
+                )
+            )
+
         result_lists = [dense_res, sparse_res]
+
         if meta_res:
             result_lists.append(meta_res)
+
         fused = reciprocal_rank_fusion(
             result_lists,
             k=effective_rrf_k,
             weights=rrf_weights,
         )
 
-        # 4. Optional Reranking
         if reranker_type != "none" and fused:
             try:
                 with tracer.start_as_current_span("retrieval.rerank"):
@@ -499,22 +616,26 @@ class GenerationPipeline:
                         top_n=rerank_candidate_k,
                     )
             except Exception as rerank_err:
-                logger.warning("Reranking failed, using RRF candidates: %s", rerank_err)
+                logger.warning(
+                    "Reranking failed, using RRF candidates: %s",
+                    rerank_err,
+                )
                 candidates = fused
         else:
             candidates = fused
 
         top_candidates = candidates[:effective_top_k]
 
-        # 5. Context Assembly
         with tracer.start_as_current_span("generation.context_assembly"):
             assembled = self.assembler.assemble(
                 top_candidates,
                 max_tokens=effective_max_tokens,
             )
-        retrieval_latency_ms = int((time.perf_counter() - retrieval_start) * 1000)
 
-        # 6. Prompt Assembly
+        retrieval_latency_ms = int(
+            (time.perf_counter() - retrieval_start) * 1000
+        )
+
         with tracer.start_as_current_span("generation.prompt_assembly"):
             prompt = self.prompt_builder.build(
                 query=processed.query,
@@ -523,15 +644,14 @@ class GenerationPipeline:
                 pipeline_config=cfg_dict,
             )
 
-        # Convert chunk IDs to UUIDs for DB schema compatibility
         retrieved_uuids: list[UUID] = []
-        for s in assembled.sources:
+
+        for source in assembled.sources:
             try:
-                retrieved_uuids.append(UUID(str(s.get("chunk_id"))))
+                retrieved_uuids.append(UUID(str(source.get("chunk_id"))))
             except (ValueError, TypeError):
                 pass
 
-        # 7. Persist pipeline_runs record BEFORE LLM call
         await self._create_pipeline_run(
             run_id=target_run_id,
             pipeline_id=pipeline_id,
@@ -543,7 +663,6 @@ class GenerationPipeline:
             execution_metadata={"config_used": cfg_dict} if cfg_dict else {},
         )
 
-        # 8. Call LLM
         messages = [
             ChatMessage(role="system", content=prompt.system_prompt),
             ChatMessage(role="user", content=prompt.user_prompt),
@@ -551,22 +670,28 @@ class GenerationPipeline:
 
         try:
             cost_usd: float | None = None
+
             if self.client and hasattr(self.client, "chat"):
-                llm_res = await self.client.chat(messages, temperature=effective_temp)
+                llm_res = await self.client.chat(
+                    messages,
+                    temperature=effective_temp,
+                )
                 content = llm_res.content
                 in_tokens = llm_res.input_tokens
                 out_tokens = llm_res.output_tokens
                 used_model = getattr(llm_res, "model", effective_model)
                 cost_usd = getattr(llm_res, "cost_usd", None)
+
             else:
-                # Deterministic fallback if mock / testing
-                content = "Based on the provided context [Source 1], the answer is clearly documented."
+                content = (
+                    "Based on the provided context [Source 1], "
+                    "the answer is clearly documented."
+                )
                 in_tokens = self.token_counter.count(prompt.full_prompt)
                 out_tokens = self.token_counter.count(content)
                 used_model = effective_model
                 cost_usd = 0.0001
 
-            # 9. Citation parsing and validation
             parsed_citations = self.citation_tracker.extract_and_validate(
                 generation_text=content,
                 source_map=prompt.source_map,
@@ -574,7 +699,6 @@ class GenerationPipeline:
 
             latency_ms = int((time.perf_counter() - start_time) * 1000)
 
-            # 10. Update DB record to completed
             await self._update_pipeline_run_success(
                 run_id=target_run_id,
                 pipeline_id=pipeline_id,
@@ -587,7 +711,6 @@ class GenerationPipeline:
                 cost_usd=cost_usd,
             )
 
-            # 11. Cache full-query response
             if (
                 self.redis is not None
                 and cache_key
@@ -608,18 +731,25 @@ class GenerationPipeline:
                         "cost_usd": cost_usd,
                         "retrieval_latency_ms": retrieval_latency_ms,
                     }
+
                     await self.redis.set(
                         cache_key,
                         json.dumps(cache_entry, separators=(",", ":")),
                         ex=effective_cache_ttl,
                     )
-                except Exception as cache_write_err:
-                    logger.debug("Query cache write failed: %s", cache_write_err)
 
-            # 12. Enqueue async eval job if auto_evaluate is enabled
+                except Exception as cache_write_err:
+                    logger.debug(
+                        "Query cache write failed: %s",
+                        cache_write_err,
+                    )
+
             if auto_evaluate:
                 asyncio.create_task(
-                    self._enqueue_eval_job(str(target_run_id), str(pipeline_id))
+                    self._enqueue_eval_job(
+                        str(target_run_id),
+                        str(pipeline_id),
+                    )
                 )
 
             return GenerationResult(
@@ -642,6 +772,7 @@ class GenerationPipeline:
 
         except Exception as exc:
             latency_ms = int((time.perf_counter() - start_time) * 1000)
+
             await self._update_pipeline_run_failure(
                 run_id=target_run_id,
                 pipeline_id=pipeline_id,
@@ -660,58 +791,81 @@ class GenerationPipeline:
         rerank: bool = True,
         model_name: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Progressive streaming generator yielding SSE event dictionaries."""
+        """Yield progressive server-sent events during generation."""
         start_time = time.perf_counter()
 
-        effective_version, cfg_dict = await self._load_pipeline_config(pipeline_id)
+        effective_version, cfg_dict = await self._load_pipeline_config(
+            pipeline_id
+        )
+
         retrieval_cfg = (cfg_dict or {}).get("retrieval", {})
         generation_cfg = (cfg_dict or {}).get("generation", {})
+
         if cfg_dict:
             top_k = retrieval_cfg.get("top_k_after_rerank", top_k)
-            max_context_tokens = generation_cfg.get("max_context_tokens", max_context_tokens)
-            rerank_type = retrieval_cfg.get("reranker", "cross-encoder" if rerank else "none")
+            max_context_tokens = generation_cfg.get(
+                "max_context_tokens",
+                max_context_tokens,
+            )
+            rerank_type = retrieval_cfg.get(
+                "reranker",
+                "cross-encoder" if rerank else "none",
+            )
         else:
             rerank_type = "cross-encoder" if rerank else "none"
+
         dense_k = retrieval_cfg.get("dense_k", top_k * 2)
         sparse_k = retrieval_cfg.get("sparse_k", top_k * 2)
         rrf_k = retrieval_cfg.get("rrf_k", 60)
+
         rrf_weights = {
             "dense": retrieval_cfg.get("dense_rrf_weight", 0.6),
             "sparse": retrieval_cfg.get("sparse_rrf_weight", 0.4),
             "metadata": retrieval_cfg.get("metadata_rrf_weight", 0.4),
         }
+
         hnsw_ef_search = retrieval_cfg.get("hnsw_ef_search", 40)
         rerank_candidate_k = retrieval_cfg.get("rerank_candidate_k", 40)
 
-        # 1. Event: retrieval_start
         yield {"type": "retrieval_start"}
 
         try:
-            # 2. Query processing & Retrieval
             with tracer.start_as_current_span("query.processing"):
                 processed = await self.processor.process(
                     query,
                     expand=retrieval_cfg.get("query_expansion", True),
                 )
+
             with tracer.start_as_current_span("retrieval.hybrid"):
-                dense_res, sparse_res, meta_res = await self.retriever.retrieve_parallel(
-                    query=processed,
-                    k=max(dense_k, sparse_k),
-                    pipeline_id=pipeline_id,
-                    filters=(
-                        processed.filters
-                        if retrieval_cfg.get("metadata_filters_enabled", True)
-                        else None
-                    ),
-                    dense_k=dense_k,
-                    sparse_k=sparse_k,
-                    hnsw_ef_search=hnsw_ef_search,
+                dense_res, sparse_res, meta_res = (
+                    await self.retriever.retrieve_parallel(
+                        query=processed,
+                        k=max(dense_k, sparse_k),
+                        pipeline_id=pipeline_id,
+                        filters=(
+                            processed.filters
+                            if retrieval_cfg.get(
+                                "metadata_filters_enabled",
+                                True,
+                            )
+                            else None
+                        ),
+                        dense_k=dense_k,
+                        sparse_k=sparse_k,
+                        hnsw_ef_search=hnsw_ef_search,
+                    )
                 )
 
             result_lists = [dense_res, sparse_res]
+
             if meta_res:
                 result_lists.append(meta_res)
-            fused = reciprocal_rank_fusion(result_lists, k=rrf_k, weights=rrf_weights)
+
+            fused = reciprocal_rank_fusion(
+                result_lists,
+                k=rrf_k,
+                weights=rrf_weights,
+            )
 
             if rerank_type != "none" and fused:
                 try:
@@ -728,13 +882,13 @@ class GenerationPipeline:
                 candidates = fused
 
             top_candidates = candidates[:top_k]
+
             with tracer.start_as_current_span("generation.context_assembly"):
                 assembled = self.assembler.assemble(
                     top_candidates,
                     max_tokens=max_context_tokens,
                 )
 
-            # 3. Event: retrieval_complete
             yield {
                 "type": "retrieval_complete",
                 "chunk_count": assembled.chunks_used,
@@ -753,7 +907,6 @@ class GenerationPipeline:
                 },
             }
 
-            # 4. Prompt Assembly
             with tracer.start_as_current_span("generation.prompt_assembly"):
                 prompt = self.prompt_builder.build(
                     query=processed.query,
@@ -763,13 +916,13 @@ class GenerationPipeline:
                 )
 
             retrieved_uuids: list[UUID] = []
-            for s in assembled.sources:
+
+            for source in assembled.sources:
                 try:
-                    retrieved_uuids.append(UUID(str(s.get("chunk_id"))))
+                    retrieved_uuids.append(UUID(str(source.get("chunk_id"))))
                 except (ValueError, TypeError):
                     pass
 
-            # 5. Persist run BEFORE calling LLM
             await self._create_pipeline_run(
                 run_id=run_id,
                 pipeline_id=pipeline_id,
@@ -779,30 +932,39 @@ class GenerationPipeline:
                 pipeline_version=effective_version,
             )
 
-            # 6. Stream tokens from LLM
             effective_model = model_name or "gpt-4o-mini"
+
             messages = [
                 ChatMessage(role="system", content=prompt.system_prompt),
                 ChatMessage(role="user", content=prompt.user_prompt),
             ]
 
             full_text = ""
+
             if self.client and hasattr(self.client, "stream"):
                 async for delta in self.client.stream(messages):
                     full_text += delta
                     yield {"type": "token", "delta": delta}
-            else:
-                # Mock token streaming for local testing
-                mock_tokens = [
-                    "Based ", "on ", "the ", "provided ", "context ", "[Source 1], ",
-                    "the ", "answer ", "is ", "clear."
-                ]
-                for tok in mock_tokens:
-                    await asyncio.sleep(0.02)
-                    full_text += tok
-                    yield {"type": "token", "delta": tok}
 
-            # 7. Parse citations and metrics
+            else:
+                mock_tokens = [
+                    "Based ",
+                    "on ",
+                    "the ",
+                    "provided ",
+                    "context ",
+                    "[Source 1], ",
+                    "the ",
+                    "answer ",
+                    "is ",
+                    "clear.",
+                ]
+
+                for token in mock_tokens:
+                    await asyncio.sleep(0.02)
+                    full_text += token
+                    yield {"type": "token", "delta": token}
+
             parsed_citations = self.citation_tracker.extract_and_validate(
                 generation_text=full_text,
                 source_map=prompt.source_map,
@@ -812,7 +974,6 @@ class GenerationPipeline:
             out_tokens = self.token_counter.count(full_text)
             latency_ms = int((time.perf_counter() - start_time) * 1000)
 
-            # 8. Persist completion
             await self._update_pipeline_run_success(
                 run_id=run_id,
                 pipeline_id=pipeline_id,
@@ -824,12 +985,13 @@ class GenerationPipeline:
                 model_used=effective_model,
             )
 
-            # 9. Enqueue eval job asynchronously
             asyncio.create_task(
-                self._enqueue_eval_job(str(run_id), str(pipeline_id))
+                self._enqueue_eval_job(
+                    str(run_id),
+                    str(pipeline_id),
+                )
             )
 
-            # 10. Event: done
             yield {
                 "type": "done",
                 "run_id": str(run_id),
@@ -837,12 +999,23 @@ class GenerationPipeline:
             }
 
         except Exception as exc:
-            logger.exception("Error during streaming generation for run %s: %s", run_id, exc)
+            logger.exception(
+                "Error during streaming generation for run %s: %s",
+                run_id,
+                exc,
+            )
+
             latency_ms = int((time.perf_counter() - start_time) * 1000)
+
             await self._update_pipeline_run_failure(
                 run_id=run_id,
                 pipeline_id=pipeline_id,
                 error_message=str(exc),
                 latency_ms=latency_ms,
             )
-            yield {"type": "error", "error": str(exc), "run_id": str(run_id)}
+
+            yield {
+                "type": "error",
+                "error": str(exc),
+                "run_id": str(run_id),
+            }

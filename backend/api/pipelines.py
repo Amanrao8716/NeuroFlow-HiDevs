@@ -136,6 +136,8 @@ async def create_pipeline(
     _admin: object = Depends(require_scope("admin")),
 ) -> PipelineResponse:
     """Validate and create a new RAG pipeline, establishing version 1."""
+    if payload.name is None:
+        raise HTTPException(status_code=422, detail="Pipeline name must be 1 to 100 characters.")
     payload.name = sanitize_text(payload.name).strip()
     if payload.description is not None:
         payload.description = sanitize_text(payload.description)

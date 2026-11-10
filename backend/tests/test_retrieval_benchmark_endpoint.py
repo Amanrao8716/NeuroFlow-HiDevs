@@ -1,5 +1,7 @@
+
 """Test-only retrieval ranking endpoint remains disabled unless explicitly enabled."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -12,6 +14,7 @@ def test_benchmark_ranking_endpoint_is_disabled_by_default(monkeypatch):
 
     monkeypatch.delenv("NEUROFLOW_TEST_BENCHMARK_ENDPOINT", raising=False)
     monkeypatch.setattr(retrieve_api._retriever, "retrieve_parallel", AsyncMock())
+
     response = TestClient(app).post(
         "/__test__/retrieval-rankings",
         json={
@@ -26,6 +29,7 @@ def test_benchmark_ranking_endpoint_is_disabled_by_default(monkeypatch):
 
 
 def test_benchmark_ranking_endpoint_returns_all_four_actual_methods(monkeypatch):
+    import api.query as query_api
     import api.retrieve as retrieve_api
     from main import app
 
@@ -35,6 +39,21 @@ def test_benchmark_ranking_endpoint_returns_all_four_actual_methods(monkeypatch)
     monkeypatch.setenv("NEUROFLOW_TEST_BENCHMARK_ENDPOINT", "true")
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+
+    pipeline = SimpleNamespace(
+        client=SimpleNamespace(embed=lambda _text: [])
+    )
+    monkeypatch.setattr(
+        query_api,
+        "get_generation_pipeline",
+        lambda _request: pipeline,
+    )
+    monkeypatch.setattr(
+        retrieve_api,
+        "classify_query",
+        AsyncMock(return_value=False),
+    )
+
     dense = [
         RetrievalResult("dense-id", "doc", "dense text", 0.9, retrieval_method="dense", rank=1)
     ]
@@ -46,15 +65,22 @@ def test_benchmark_ranking_endpoint_returns_all_four_actual_methods(monkeypatch)
             "fused-id", "doc", "fused text", 0.03, retrieval_method="rrf_fusion", rank=1
         )
     ]
+
     monkeypatch.setattr(
         retrieve_api._processor,
         "process",
         AsyncMock(return_value=ProcessedQuery(query="offline validation question")),
     )
     monkeypatch.setattr(
-        retrieve_api._retriever, "retrieve_parallel", AsyncMock(return_value=(dense, sparse, []))
+        retrieve_api._retriever,
+        "retrieve_parallel",
+        AsyncMock(return_value=(dense, sparse, [])),
     )
-    monkeypatch.setattr(retrieve_api._reranker, "rerank", AsyncMock(return_value=fused))
+    monkeypatch.setattr(
+        retrieve_api._reranker,
+        "rerank",
+        AsyncMock(return_value=fused),
+    )
 
     response = TestClient(app).post(
         "/__test__/retrieval-rankings",
@@ -83,8 +109,13 @@ def test_benchmark_ranking_endpoint_refuses_online_model_loading(monkeypatch):
     monkeypatch.setenv("NEUROFLOW_TEST_BENCHMARK_ENDPOINT", "true")
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+
     retrieve_mock = AsyncMock()
-    monkeypatch.setattr(retrieve_api._retriever, "retrieve_parallel", retrieve_mock)
+    monkeypatch.setattr(
+        retrieve_api._retriever,
+        "retrieve_parallel",
+        retrieve_mock,
+    )
 
     response = TestClient(app).post(
         "/__test__/retrieval-rankings",

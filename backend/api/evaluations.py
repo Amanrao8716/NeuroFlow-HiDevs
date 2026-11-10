@@ -200,7 +200,8 @@ async def _resolve_pipeline_id(run_id: UUID, provided_pid: UUID | None) -> UUID:
                 status_code=404,
                 detail=f"Pipeline run {run_id} not found.",
             )
-        return row["pipeline_id"]
+        pid = row["pipeline_id"]
+        return pid if isinstance(pid, UUID) else UUID(str(pid))
 
 
 @router.patch(

@@ -1,4 +1,9 @@
-"""NeuroFlow Hybrid Retrieval Pipeline: Query Processing, Multi-Method Retrieval, RRF Fusion, Reranking, and Context Assembly."""
+
+"""NeuroFlow hybrid retrieval pipeline.
+
+Includes query processing, multi-method retrieval, RRF fusion,
+reranking, and context assembly.
+"""
 
 from pipelines.retrieval.context_assembler import (
     AssembledContext,

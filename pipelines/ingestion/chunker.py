@@ -2,13 +2,12 @@
 """Chunk extracted document content using configurable strategies."""
 
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import tiktoken
 
 from pipelines.ingestion.models import ExtractedPage
-
 
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_OVERLAP = 64
@@ -48,7 +47,7 @@ def fixed_size_chunks(
     if chunk_size <= 0 or overlap < 0 or overlap >= chunk_size:
         raise ValueError("Require chunk_size > overlap >= 0.")
 
-    chunks = []
+    chunks: list[dict[str, Any]] = []
     current_sentences: list[str] = []
     current_tokens = 0
     page_metadata: list[dict[str, Any]] = []
@@ -109,7 +108,7 @@ def fixed_size_chunks(
 
 async def semantic_chunks(
     pages: list[ExtractedPage],
-    embed: Callable,
+    embed: Callable[[list[str]], Awaitable[Any]],
     threshold: float = SEMANTIC_THRESHOLD,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> list[dict[str, Any]]:
@@ -134,7 +133,7 @@ async def semantic_chunks(
     groups: list[list[tuple[str, int, str]]] = [[]]
     group_tokens = 0
 
-    for index, sentence in enumerate(sentences):
+    for index, sentence_item in enumerate(sentences):
         if index > 0:
             left, right = vectors[index - 1], vectors[index]
             dot = sum(a * b for a, b in zip(left, right))
@@ -146,12 +145,15 @@ async def semantic_chunks(
                 else 0.0
             )
 
-            if similarity < threshold or group_tokens + _token_count(sentence[0]) > chunk_size:
+            if (
+                similarity < threshold
+                or group_tokens + _token_count(sentence_item[0]) > chunk_size
+            ):
                 groups.append([])
                 group_tokens = 0
 
-        groups[-1].append(sentence)
-        group_tokens += _token_count(sentence[0])
+        groups[-1].append(sentence_item)
+        group_tokens += _token_count(sentence_item[0])
 
     return [
         _make_chunk(
@@ -172,11 +174,10 @@ def hierarchical_chunks(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> list[dict[str, Any]]:
     """Create section parent chunks and subsection child chunks."""
-    chunks = []
+    chunks: list[dict[str, Any]] = []
     sections: list[dict[str, Any]] = []
     current_heading = "Document"
     current_section: list[str] = []
-    current_page = 1
 
     def save_section() -> None:
         if not current_section:
@@ -214,10 +215,7 @@ def hierarchical_chunks(
             save_section()
             current_heading = " > ".join(heading_hierarchy)
             current_section = []
-            current_page = page.page_number
         else:
-            if not current_section:
-                current_page = page.page_number
             current_section.append(page.content)
 
     save_section()
@@ -290,7 +288,7 @@ def select_strategy(pages: list[ExtractedPage]) -> str:
 
 async def chunk_pages(
     pages: list[ExtractedPage],
-    embed: Callable | None = None,
+    embed: Callable[[list[str]], Awaitable[Any]] | None = None,
     strategy: str = "auto",
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap: int = DEFAULT_OVERLAP,

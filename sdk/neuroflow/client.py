@@ -1,3 +1,4 @@
+
 """Async HTTP client for the NeuroFlow RAG API."""
 
 from __future__ import annotations
@@ -5,10 +6,12 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+from collections.abc import AsyncIterator, Generator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, cast
 
 import httpx
+from httpx._types import RequestFiles
 
 from neuroflow.exceptions import (
     AuthenticationError,
@@ -34,13 +37,7 @@ _MAX_RETRIES = 3
 
 
 class QueryResponseHandler:
-    """Handles both awaiting a query response and direct async-iteration of tokens.
-
-    Supports:
-        result = await client.query("...", pipeline_id="...", stream=False)
-        async for token in client.query("...", pipeline_id="...", stream=True):
-            print(token)
-    """
+    """Handle awaiting a query response and iterating over tokens."""
 
     def __init__(
         self,
@@ -48,7 +45,7 @@ class QueryResponseHandler:
         query: str,
         pipeline_id: str,
         stream: bool,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> None:
         self._client = client
         self._query = query
@@ -56,12 +53,14 @@ class QueryResponseHandler:
         self._stream = stream
         self._kwargs = kwargs
 
-    def __await__(self):
+    def __await__(
+        self,
+    ) -> Generator[Any, None, QueryResult | AsyncIterator[str]]:
         return self._client._execute_query(
             self._query,
             self._pipeline_id,
             stream=self._stream,
-            **self._kwargs,
+            **cast(dict[str, Any], self._kwargs),
         ).__await__()
 
     def __aiter__(self) -> AsyncIterator[str]:
@@ -73,7 +72,7 @@ class QueryResponseHandler:
         return self._client._stream_query_tokens(
             self._query,
             self._pipeline_id,
-            **self._kwargs,
+            **cast(dict[str, Any], self._kwargs),
         )
 
 
@@ -107,17 +106,15 @@ class NeuroFlowClient:
         """Initialize the NeuroFlow client.
 
         Args:
-            base_url: Root URL of the NeuroFlow API (e.g. ``http://localhost:8000``).
-            token: Pre-existing JWT bearer token. Mutually exclusive with
-                ``client_id``/``client_secret``.
-            client_id: Client ID for automatic token exchange via ``POST /auth/token``.
+            base_url: Root URL of the NeuroFlow API.
+            token: Pre-existing JWT bearer token.
+            client_id: Client ID for automatic token exchange.
             client_secret: Client secret for automatic token exchange.
             timeout: Default HTTP request timeout in seconds.
-            poll_interval: Seconds between status polls for async operations.
-            poll_timeout: Maximum seconds to wait when polling before raising
-                :class:`~neuroflow.exceptions.TimeoutError`.
+            poll_interval: Seconds between status polls.
+            poll_timeout: Maximum time to wait when polling.
             max_retries: Maximum retry attempts for HTTP 429 responses.
-            transport: Custom HTTP transport (useful for mocking/testing).
+            transport: Custom HTTP transport for testing.
         """
         self.base_url = base_url.rstrip("/")
         self._token = token
@@ -129,8 +126,6 @@ class NeuroFlowClient:
         self._max_retries = max_retries
         self._transport = transport
         self._http: httpx.AsyncClient | None = None
-
-    # ── lifecycle ────────────────────────────────────────────────────
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
@@ -155,8 +150,6 @@ class NeuroFlowClient:
         if self._http and not self._http.is_closed:
             await self._http.aclose()
 
-    # ── authentication ───────────────────────────────────────────────
-
     async def _authenticate(self) -> None:
         """Exchange client credentials for a JWT token."""
         http = await self._ensure_client()
@@ -176,17 +169,15 @@ class NeuroFlowClient:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
-    # ── request helpers ──────────────────────────────────────────────
-
     async def _request(
         self,
         method: str,
         path: str,
         *,
-        json: Any = None,
-        params: dict[str, Any] | None = None,
-        data: Any = None,
-        files: Any = None,
+        json: object | None = None,
+        params: dict[str, str] | None = None,
+        data: dict[str, str] | None = None,
+        files: RequestFiles | None = None,
         retry_on_429: bool = True,
     ) -> httpx.Response:
         """Send an HTTP request with automatic 429 retry and error mapping."""
@@ -240,10 +231,8 @@ class NeuroFlowClient:
 
             return resp
 
-    # ── polling helper ───────────────────────────────────────────────
-
     async def _poll_document(self, document_id: str, pipeline_id: str) -> Document:
-        """Poll ``GET /documents/{id}`` until status leaves 'queued'/'processing'."""
+        """Poll until document processing leaves queued or processing status."""
         elapsed = 0.0
         while elapsed < self._poll_timeout:
             resp = await self._request(
@@ -275,41 +264,30 @@ class NeuroFlowClient:
             f"Document {document_id} did not finish within {self._poll_timeout}s."
         )
 
-    # ── public API ───────────────────────────────────────────────────
-
     async def ingest_file(
         self,
         file_path: str | Path,
         pipeline_id: str | None = None,
     ) -> Document:
-        """Upload a local file for ingestion and poll until processing completes.
-
-        Args:
-            file_path: Path to a local PDF, DOCX, image, or CSV file.
-            pipeline_id: UUID of the target pipeline.
-
-        Returns:
-            A :class:`Document` with ``status='completed'`` and populated ``chunk_count``.
-
-        Raises:
-            IngestionError: If pipeline_id is missing, file is invalid, or processing fails.
-            TimeoutError: If processing does not complete within ``poll_timeout``.
-        """
+        """Upload a local file for ingestion and poll until processing completes."""
         if not pipeline_id:
             raise IngestionError("pipeline_id must be provided for document ingestion.")
 
         path = Path(file_path)
-        if not path.is_file():
+        is_file = await asyncio.to_thread(path.is_file)
+
+        if not is_file:
             raise IngestionError(f"File not found: {path}")
 
-        with path.open("rb") as fh:
-            resp = await self._request(
-                "POST",
-                "/ingest",
-                files={"file": (path.name, fh)},
-                data={"pipeline_id": pipeline_id},
-                retry_on_429=False,  # Don't retry file uploads
-            )
+        file_content = await asyncio.to_thread(path.read_bytes)
+
+        resp = await self._request(
+            "POST",
+            "/ingest",
+            files={"file": (path.name, file_content)},
+            data={"pipeline_id": pipeline_id},
+            retry_on_429=False,
+        )
 
         body = resp.json()
         doc_id = body["document_id"]
@@ -328,18 +306,7 @@ class NeuroFlowClient:
         url: str,
         pipeline_id: str | None = None,
     ) -> Document:
-        """Submit a URL for ingestion and poll until processing completes.
-
-        Args:
-            url: A publicly reachable URL to scrape and ingest.
-            pipeline_id: UUID of the target pipeline.
-
-        Returns:
-            A :class:`Document` with ``status='completed'``.
-
-        Raises:
-            IngestionError: If pipeline_id is missing or processing fails.
-        """
+        """Submit a URL for ingestion and poll until processing completes."""
         if not pipeline_id:
             raise IngestionError("pipeline_id must be provided for URL ingestion.")
 
@@ -365,21 +332,9 @@ class NeuroFlowClient:
         query: str,
         pipeline_id: str,
         stream: bool = False,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> QueryResponseHandler:
-        """Execute a RAG query.
-
-        Args:
-            query: Natural language question.
-            pipeline_id: UUID of the pipeline to query.
-            stream: If ``True``, yields token strings via SSE stream.
-            **kwargs: Optional execution parameters (e.g. ``top_k``, ``rerank``).
-
-        Returns:
-            A :class:`QueryResponseHandler` supporting both:
-            - ``await client.query(...)`` -> :class:`QueryResult`
-            - ``async for token in client.query(..., stream=True): ...`` -> string tokens
-        """
+        """Execute a RAG query."""
         return QueryResponseHandler(
             self,
             query=query,
@@ -396,7 +351,7 @@ class NeuroFlowClient:
         stream: bool = False,
         top_k: int = 10,
         rerank: bool = True,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> QueryResult | AsyncIterator[str]:
         if stream:
             return self._stream_query_tokens(
@@ -407,7 +362,7 @@ class NeuroFlowClient:
                 **kwargs,
             )
 
-        payload = {
+        payload: dict[str, object] = {
             "query": query,
             "pipeline_id": pipeline_id,
             "stream": False,
@@ -440,9 +395,9 @@ class NeuroFlowClient:
         *,
         top_k: int = 10,
         rerank: bool = True,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> AsyncIterator[str]:
-        payload = {
+        payload: dict[str, object] = {
             "query": query,
             "pipeline_id": pipeline_id,
             "stream": True,
@@ -502,17 +457,8 @@ class NeuroFlowClient:
         *,
         pipeline_id: str | None = None,
     ) -> EvaluationResult:
-        """Fetch the evaluation result for a pipeline run.
-
-        Args:
-            run_id: UUID of the pipeline run.
-            wait: If ``True``, poll until the evaluation is available.
-            pipeline_id: Optional pipeline ID for tenant routing.
-
-        Returns:
-            :class:`EvaluationResult` with LLM judge scores.
-        """
-        params: dict[str, Any] = {}
+        """Fetch the evaluation result for a pipeline run."""
+        params: dict[str, str] = {}
         if pipeline_id:
             params["pipeline_id"] = pipeline_id
 
@@ -548,11 +494,7 @@ class NeuroFlowClient:
                 elapsed += self._poll_interval
 
     async def list_pipelines(self) -> list[Pipeline]:
-        """Return all active pipelines.
-
-        Returns:
-            List of :class:`Pipeline` objects.
-        """
+        """Return all active pipelines."""
         resp = await self._request("GET", "/pipelines")
         pipelines = []
         for item in resp.json():
@@ -575,18 +517,9 @@ class NeuroFlowClient:
         config: dict[str, Any] | str,
         *,
         description: str | None = None,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> Pipeline:
-        """Create a new RAG pipeline.
-
-        Args:
-            config: Pipeline configuration dictionary (or pipeline name string).
-            description: Optional pipeline description.
-            **kwargs: Extra parameters passed to the request payload.
-
-        Returns:
-            Created :class:`Pipeline` with version 1.
-        """
+        """Create a new RAG pipeline."""
         if isinstance(config, str):
             payload: dict[str, Any] = {"name": config}
             if description is not None:

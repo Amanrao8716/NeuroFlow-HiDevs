@@ -1,20 +1,22 @@
+
 """Fine-Tuning Job Manager coordinating extraction, MLflow tracking, and OpenAI submission."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 from arq.connections import RedisSettings, create_pool
-from openai import AsyncOpenAI
-
 from config import settings
 from db.pool import connection
+from openai import AsyncOpenAI
+
 from pipelines.finetuning.extractor import TrainingDataExtractor
 from pipelines.finetuning.tracker import MLflowTracker
 
@@ -24,7 +26,7 @@ OPENAI_MINIMUM_EXAMPLES = 10
 
 
 class FinetuneJobManager:
-    """Orchestrates end-to-end fine-tuning lifecycle: extraction, tracking, submission, and polling."""
+    """Orchestrates extraction, tracking, submission, and polling."""
 
     def __init__(
         self,
@@ -32,7 +34,7 @@ class FinetuneJobManager:
         tracker: MLflowTracker | None = None,
         openai_client: AsyncOpenAI | None = None,
         redis_settings: RedisSettings | None = None,
-    ):
+    ) -> None:
         self.extractor = extractor or TrainingDataExtractor()
         self.tracker = tracker or MLflowTracker()
         self.openai_client = openai_client or AsyncOpenAI(
@@ -56,7 +58,11 @@ class FinetuneJobManager:
                     str(job_id),
                     _defer_by=defer_seconds,
                 )
-                logger.info("Enqueued ARQ polling task for job %s deferred by %ds", job_id, defer_seconds)
+                logger.info(
+                    "Enqueued ARQ polling task for job %s deferred by %ds",
+                    job_id,
+                    defer_seconds,
+                )
             finally:
                 await pool.aclose()
         except Exception as exc:
@@ -69,9 +75,9 @@ class FinetuneJobManager:
         min_quality_score: float = 0.82,
         training_format: str = "sft",
     ) -> dict[str, Any]:
-        """Execute steps 1-10: DB record creation, extraction, validation, MLflow, upload, submission, and ARQ schedule."""
+        """Extract, validate, track, upload, submit, and schedule fine-tuning."""
         job_id = uuid4()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # 1. Create a pending fine-tuning job record in PostgreSQL
         async with connection() as conn:
@@ -88,7 +94,11 @@ class FinetuneJobManager:
                 now,
             )
 
-        logger.info("Created pending fine-tuning job %s with base model %s", job_id, base_model)
+        logger.info(
+            "Created pending fine-tuning job %s with base model %s",
+            job_id,
+            base_model,
+        )
 
         # 2. Extract and validate training data
         self.extractor.min_quality_score = min_quality_score
@@ -114,7 +124,7 @@ class FinetuneJobManager:
 
         accepted_count = report["accepted_count"]
 
-        # 3. Reject or clearly report insufficient valid training examples (OpenAI requires >= 10)
+        # 3. Reject insufficient valid training examples
         if accepted_count < OPENAI_MINIMUM_EXAMPLES:
             reason = (
                 f"Insufficient training examples: {accepted_count} valid examples extracted, "
@@ -160,21 +170,31 @@ class FinetuneJobManager:
                 training_file_path=file_path,
             )
         except Exception as exc:
-            logger.warning("MLflow tracking encountered error for job %s: %s", job_id, exc)
-            # Record error in report but allow submission or capture failure
+            logger.warning(
+                "MLflow tracking encountered error for job %s: %s",
+                job_id,
+                exc,
+            )
             report["mlflow_error"] = str(exc)
 
         # 5. Upload JSONL using AsyncOpenAI with purpose 'fine-tune'
         provider_file_id = None
         provider_job_id = None
+
         try:
-            with open(file_path, "rb") as f:
+            file_handle = await asyncio.to_thread(Path(file_path).open, "rb")
+            with file_handle as training_file:
                 upload_res = await self.openai_client.files.create(
-                    file=f,
+                    file=training_file,
                     purpose="fine-tune",
                 )
+
             provider_file_id = upload_res.id
-            logger.info("Uploaded training file for job %s: %s", job_id, provider_file_id)
+            logger.info(
+                "Uploaded training file for job %s: %s",
+                job_id,
+                provider_file_id,
+            )
 
             # 6. Submit the fine-tuning job with the selected base model
             ft_res = await self.openai_client.fine_tuning.jobs.create(
@@ -182,7 +202,11 @@ class FinetuneJobManager:
                 model=base_model,
             )
             provider_job_id = ft_res.id
-            logger.info("Submitted OpenAI fine-tuning job %s -> provider ID %s", job_id, provider_job_id)
+            logger.info(
+                "Submitted OpenAI fine-tuning job %s -> provider ID %s",
+                job_id,
+                provider_job_id,
+            )
 
         except Exception as exc:
             err_msg = f"Provider submission failed: {exc}"
@@ -215,10 +239,14 @@ class FinetuneJobManager:
 
             raise RuntimeError(err_msg) from exc
 
-        # 7. Safely associate training pairs with the job in a transaction after successful submission
-        pair_ids = [p.id for p in accepted_pairs]
+        # 7. Associate training pairs with the job after successful submission
+        pair_ids = [pair.id for pair in accepted_pairs]
         marked_count = await self.extractor.mark_pairs_included_in_job(job_id, pair_ids)
-        logger.info("Marked %d training pairs as consumed by job %s", marked_count, job_id)
+        logger.info(
+            "Marked %d training pairs as consumed by job %s",
+            marked_count,
+            job_id,
+        )
 
         # 8. Update DB with provider job ID, running status, and MLflow run ID
         async with connection() as conn:
@@ -239,7 +267,7 @@ class FinetuneJobManager:
                 job_id,
             )
 
-        # 9. Schedule status polling through ARQ infrastructure at 60-second intervals
+        # 9. Schedule status polling through ARQ infrastructure
         await self.schedule_polling_task(job_id, defer_seconds=60)
 
         return {

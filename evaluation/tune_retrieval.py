@@ -1,3 +1,4 @@
+
 """Run a retrieval hyperparameter grid against a labeled, tenant-scoped dataset.
 
 This script only recommends a config in its JSON report. It never mutates a
@@ -8,16 +9,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from itertools import product
 import json
 import logging
 import os
-from pathlib import Path
 import time
+from itertools import product
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from db.pool import close_pool, open_pool, pipeline_connection
+
 from evaluation.retrieval_eval import compute_metrics
 from pipelines.retrieval import CrossEncoderReranker, HybridRetriever, QueryProcessor
 from pipelines.retrieval.fusion import reciprocal_rank_fusion
@@ -66,14 +68,22 @@ async def run_tuning(
     dataset_path: Path = DATASET_PATH,
     output_path: Path = RESULTS_PATH,
 ) -> dict[str, Any]:
-    if not dataset_path.is_file():
+    dataset_exists = await asyncio.to_thread(dataset_path.is_file)
+    if not dataset_exists:
         raise FileNotFoundError(
             f"Labeled retrieval dataset is missing: {dataset_path}. "
             "Create a reviewed dataset with query IDs and relevant chunk IDs before tuning."
         )
-    eval_queries = json.loads(dataset_path.read_text(encoding="utf-8"))
+
+    dataset_text = await asyncio.to_thread(
+        dataset_path.read_text,
+        encoding="utf-8",
+    )
+    eval_queries = json.loads(dataset_text)
+
     if not isinstance(eval_queries, list) or len(eval_queries) < 20:
         raise ValueError("The labeled retrieval dataset must contain at least 20 queries.")
+
     if any(
         not isinstance(item, dict)
         or not item.get("id")
@@ -88,6 +98,7 @@ async def run_tuning(
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
     if not tracking_uri:
         raise RuntimeError("Set MLFLOW_TRACKING_URI to the evaluation MLflow server.")
+
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment("neuroflow-retrieval-tuning")
 
@@ -95,6 +106,7 @@ async def run_tuning(
     try:
         async with pipeline_connection(pipeline_id) as conn:
             chunk_count = await conn.fetchval("SELECT count(*) FROM chunks")
+
         if chunk_count < 50:
             raise ValueError(f"At least 50 tenant chunks are required; found {chunk_count}.")
 
@@ -108,10 +120,12 @@ async def run_tuning(
             sparse_by_query: dict[str, list[str]] = {}
             reranked_by_query: dict[str, list[str]] = {}
 
-            with mlflow.start_run(run_name=(
-                f"d{params['dense_k']}-s{params['sparse_k']}"
-                f"-t{params['top_k_after_rerank']}-rrf{params['rrf_k']}"
-            )) as run:
+            with mlflow.start_run(
+                run_name=(
+                    f"d{params['dense_k']}-s{params['sparse_k']}"
+                    f"-t{params['top_k_after_rerank']}-rrf{params['rrf_k']}"
+                )
+            ) as run:
                 mlflow.log_params(params)
                 mlflow.log_param("dense_rrf_weight", 0.6)
                 mlflow.log_param("sparse_rrf_weight", 0.4)
@@ -129,14 +143,18 @@ async def run_tuning(
                     query_id = item["id"]
                     dense_by_query[query_id] = [hit.chunk_id for hit in dense]
                     sparse_by_query[query_id] = [hit.chunk_id for hit in sparse]
+
                     fused = reciprocal_rank_fusion(
                         [dense, sparse, metadata],
                         k=params["rrf_k"],
                         weights={"dense": 0.6, "sparse": 0.4, "metadata": 0.4},
                     )
-                    reranked = await reranker.rerank(
-                        item["query"], fused, top_n=40
-                    ) if fused else []
+
+                    reranked = (
+                        await reranker.rerank(item["query"], fused, top_n=40)
+                        if fused
+                        else []
+                    )
                     reranked_by_query[query_id] = [
                         hit.chunk_id for hit in reranked[: params["top_k_after_rerank"]]
                     ]
@@ -150,7 +168,9 @@ async def run_tuning(
                 reranked_hit, reranked_mrr, _ = compute_metrics(
                     eval_queries, reranked_by_query, k=10
                 )
+
                 mean_latency_ms = (time.perf_counter() - started) * 1000 / len(eval_queries)
+
                 run_result = {
                     "status": "completed",
                     **params,
@@ -163,6 +183,7 @@ async def run_tuning(
                     "mean_query_latency_ms": round(mean_latency_ms, 3),
                     "mlflow_run_id": run.info.run_id,
                 }
+
                 mlflow.log_metrics(
                     {
                         key: run_result[key]
@@ -177,6 +198,7 @@ async def run_tuning(
                         )
                     }
                 )
+
                 results.append(run_result)
                 logger.info("Completed MLflow run %s", run.info.run_id)
 
@@ -192,8 +214,15 @@ async def run_tuning(
             "runs": results,
             "note": "Recommendation only; the persisted pipeline was not modified.",
         }
-        output_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+        report_text = json.dumps(report, indent=2)
+        await asyncio.to_thread(
+            output_path.write_text,
+            report_text,
+            encoding="utf-8",
+        )
         return report
+
     finally:
         await close_pool()
 

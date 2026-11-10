@@ -289,7 +289,7 @@ async def ingest_file(
             detail="Could not queue document for processing.",
         ) from exc
 
-    response_body: dict = {
+    response_body: dict[str, object] = {
         "document_id": str(document_id),
         "status": "queued",
         "duplicate": False,
@@ -409,7 +409,7 @@ async def ingest_url(
             detail="Could not queue URL for processing.",
         ) from exc
 
-    response_body: dict = {
+    response_body: dict[str, object] = {
         "document_id": str(document_id),
         "status": "queued",
         "duplicate": False,

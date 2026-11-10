@@ -2,17 +2,17 @@
 """Extract article text and metadata from web pages asynchronously."""
 
 import asyncio
+from collections.abc import Iterable
+from typing import Any
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
-import httpx
 import httpcore
+import httpx
 import trafilatura
 
 from backend.security.validators import validate_public_url
-
 from pipelines.ingestion.models import ExtractedPage
-
 
 USER_AGENT = "NeuroFlowBot/1.0"
 
@@ -20,26 +20,45 @@ USER_AGENT = "NeuroFlowBot/1.0"
 class _PinnedBackend(httpcore.AsyncNetworkBackend):
     """Resolve the validated hostname once and pin its public address for sockets."""
 
-    def __init__(self, hostname: str, addresses: list[str]):
+    def __init__(self, hostname: str, addresses: list[str]) -> None:
         self.hostname = hostname.lower()
         self.addresses = addresses
-        self.backend = httpcore.AsyncIOBackend()
+        self.backend = httpcore.AnyIOBackend()
 
-    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+    async def connect_tcp(  # noqa: ASYNC109
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,  # noqa: ASYNC109
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
         if host.lower() != self.hostname:
-            return await self.backend.connect_tcp(host, port, timeout, local_address, socket_options)
+            return await self.backend.connect_tcp(
+                host, port, timeout, local_address, socket_options
+            )
+
         last_error = None
+
         for address in self.addresses:
             try:
-                return await self.backend.connect_tcp(address, port, timeout, local_address, socket_options)
+                return await self.backend.connect_tcp(
+                    address, port, timeout, local_address, socket_options
+                )
             except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
                 last_error = exc
+
         raise last_error or OSError("No validated public address is reachable.")
 
-    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+    async def connect_unix_socket(  # noqa: ASYNC109
+        self,
+        path: str,
+        timeout: float | None = None,  # noqa: ASYNC109
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
         return await self.backend.connect_unix_socket(path, timeout, socket_options)
 
-    async def sleep(self, seconds):
+    async def sleep(self, seconds: float) -> None:
         await self.backend.sleep(seconds)
 
 
@@ -49,9 +68,11 @@ def _safe_transport(url: str) -> httpx.AsyncHTTPTransport:
     addresses = validate_public_url(url)
     hostname = urlsplit(url).hostname or ""
     transport = httpx.AsyncHTTPTransport(retries=0)
+
     # httpx does not expose httpcore's network backend in its public transport
     # constructor; pin its pool backend before any request is sent.
     transport._pool._network_backend = _PinnedBackend(hostname, addresses)
+
     return transport
 
 
@@ -61,6 +82,7 @@ async def _is_allowed(url: str, client: httpx.AsyncClient) -> bool:
         validate_public_url(url)
     except ValueError:
         return False
+
     parsed = urlparse(url)
 
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -73,8 +95,10 @@ async def _is_allowed(url: str, client: httpx.AsyncClient) -> bool:
 
     try:
         response = await client.get(robots_url)
+
         if response.status_code == 404:
             return True
+
         response.raise_for_status()
     except httpx.HTTPError:
         # Fail closed if robots.txt cannot be checked.
@@ -83,6 +107,7 @@ async def _is_allowed(url: str, client: httpx.AsyncClient) -> bool:
     parser = RobotFileParser()
     parser.set_url(robots_url)
     parser.parse(response.text.splitlines())
+
     return parser.can_fetch(USER_AGENT, url)
 
 
@@ -98,19 +123,28 @@ async def extract_url(url: str) -> list[ExtractedPage]:
             raise ValueError("URL is invalid or disallowed by robots.txt.")
 
         response = await client.get(url)
+
         if response.is_redirect:
             location = response.headers.get("location")
+
             if not location:
                 raise ValueError("URL redirect did not include a target.")
+
             redirect_url = urljoin(url, location)
+
             async with httpx.AsyncClient(
-                transport=_safe_transport(redirect_url), timeout=20.0,
-                follow_redirects=False, headers={"User-Agent": USER_AGENT},
+                transport=_safe_transport(redirect_url),
+                timeout=20.0,
+                follow_redirects=False,
+                headers={"User-Agent": USER_AGENT},
             ) as redirect_client:
                 redirect_response = await redirect_client.get(redirect_url)
+
             if redirect_response.is_redirect:
                 raise ValueError("Multiple URL redirects are not allowed.")
+
             response = redirect_response
+
         response.raise_for_status()
 
         final_url = str(response.url)

@@ -8,7 +8,7 @@ class ChatMessage:
     """A message sent to or received from an LLM."""
 
     role: str
-    content: str | list
+    content: str | list[dict[str, object]]
 
 
 @dataclass
@@ -33,9 +33,7 @@ class BaseLLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def stream(
-        self, messages: list[ChatMessage], **kwargs: object
-    ) -> AsyncGenerator[str, None]:
+    def stream(self, messages: list[ChatMessage], **kwargs: object) -> AsyncGenerator[str, None]:
         """Stream response text progressively."""
         ...
 

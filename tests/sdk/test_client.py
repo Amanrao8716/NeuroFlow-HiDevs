@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from neuroflow import Document, EvaluationResult, NeuroFlowClient, QueryResult
-from neuroflow.exceptions import AuthenticationError, IngestionError, TimeoutError
+from neuroflow.exceptions import AuthenticationError, IngestionError
 from neuroflow.models import Pipeline
 
 

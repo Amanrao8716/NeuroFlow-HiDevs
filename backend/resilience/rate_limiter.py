@@ -38,7 +38,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+
+from resilience._redis_protocol import AsyncRedisProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -144,18 +147,18 @@ class RateLimiter:
 
     def __init__(
         self,
-        redis: object,
+        redis: AsyncRedisProtocol,
         name: str,
         *,
         config: BucketConfig | None = None,
         max_wait_seconds: float = 60.0,
-        _clock: object = None,  # injectable for tests
+        _clock: Callable[[], float] | None = None,  # injectable for tests
     ) -> None:
         self._redis = redis
         self._name = name
         self._config = config or PROVIDER_CONFIGS.get(name, OPENAI_CONFIG)
         self._max_wait = max_wait_seconds
-        self._clock = _clock or time.time
+        self._clock: Callable[[], float] = _clock or time.time
 
         prefix = f"rpb:{name}"
         self._k_tokens = f"{prefix}:tokens"
@@ -217,7 +220,7 @@ class RateLimiter:
         if not granted:
             raise RateLimitExceeded(self._name, retry_after=wait_s2)
 
-    async def peek(self) -> dict:
+    async def peek(self) -> dict[str, object]:
         """Return the current bucket state (for observability)."""
         raw_tokens = await self._redis.get(self._k_tokens)
         raw_refill = await self._redis.get(self._k_refill)
@@ -238,7 +241,7 @@ class RateLimiter:
 
 
 def pipeline_rate_limiter(
-    redis: object,
+    redis: AsyncRedisProtocol,
     pipeline_id: str,
     rate_limit_rpm: int = 60,
     max_wait_seconds: float = 60.0,
