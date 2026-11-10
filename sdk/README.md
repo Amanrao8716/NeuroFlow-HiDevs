@@ -18,7 +18,7 @@ async def main():
     async with NeuroFlowClient(
         "http://localhost:8000",
         client_id="my-app",
-        client_secret="secret",
+        client_secret="",
     ) as client:
         # Ingest a document
         doc = await client.ingest_file("report.pdf", pipeline_id="<uuid>")
