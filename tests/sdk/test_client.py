@@ -1,3 +1,4 @@
+
 """Unit tests for NeuroFlowClient core methods and authentication."""
 
 from __future__ import annotations
@@ -15,11 +16,12 @@ from neuroflow.models import Pipeline
 @pytest.mark.asyncio
 async def test_auth_token_exchange():
     """Verify that client_id and client_secret are exchanged for a token."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/auth/token":
             body = json.loads(request.content)
             assert body["client_id"] == "test-client"
-            assert body["client_secret"] == "secret"
+            assert body["client_secret"] == "test-credential"# pragma: allowlist secret
             return httpx.Response(200, json={"access_token": "mock-jwt-token"})
         return httpx.Response(404)
 
@@ -27,16 +29,17 @@ async def test_auth_token_exchange():
     async with NeuroFlowClient(
         "http://testserver",
         client_id="test-client",
-        client_secret="secret",
+        client_secret="test-credential",# pragma: allowlist secret
         transport=transport,
     ) as client:
-        assert client._token == "mock-jwt-token"
+        assert client._token == "mock-jwt-token"# pragma: allowlist secret
         assert client._auth_headers() == {"Authorization": "Bearer mock-jwt-token"}
 
 
 @pytest.mark.asyncio
 async def test_auth_failure_raises():
     """Verify 401 on /auth/token raises AuthenticationError."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"detail": "Invalid credentials"})
 
@@ -45,7 +48,7 @@ async def test_auth_failure_raises():
         async with NeuroFlowClient(
             "http://testserver",
             client_id="bad-client",
-            client_secret="bad-secret",
+            client_secret="bad-credential",# pragma: allowlist secret
             transport=transport,
         ):
             pass
@@ -93,6 +96,7 @@ async def test_ingest_file_flow(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_ingest_url_duplicate():
     """Verify ingest_url returns immediate Document when duplicate is True."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/ingest/url":
             return httpx.Response(202, json={
@@ -116,6 +120,7 @@ async def test_ingest_url_duplicate():
 @pytest.mark.asyncio
 async def test_query_synchronous():
     """Verify query with stream=False returns typed QueryResult with citations."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/query":
             return httpx.Response(200, json={
@@ -160,6 +165,7 @@ async def test_query_synchronous():
 @pytest.mark.asyncio
 async def test_get_evaluation():
     """Verify get_evaluation returns typed EvaluationResult."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/runs/run-456/evaluation":
             return httpx.Response(200, json={
