@@ -1,0 +1,261 @@
+name: neuroflow-prod
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-neuroflow}
+      POSTGRES_USER: ${POSTGRES_USER:-neuroflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the deployment environment}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-neuroflow_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in the deployment environment}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../backend/db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2.0"
+    networks: [backend]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --maxmemory 384mb --maxmemory-policy allkeys-lru"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in the deployment environment}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+    networks: [backend]
+
+  mlflow:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.mlflow
+    restart: unless-stopped
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --workers
+      - "1"
+      - --backend-store-uri
+      - postgresql://${POSTGRES_USER:-neuroflow}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the deployment environment}@postgres:5432/${POSTGRES_DB:-neuroflow}
+      - --default-artifact-root
+      - /mlartifacts
+    volumes:
+      - mlflow_artifacts:/mlartifacts
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5)"
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          # MLflow previously hit its 1 GiB cgroup limit (OOM exit 137).
+          # Even with one server worker, observed usage is ~1013 MiB.
+          memory: 2g
+          cpus: "1.0"
+    networks: [backend]
+
+  db-setup:
+    image: pgvector/pgvector:pg16
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/neuroflow/ensure-app-role.sh"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-neuroflow}
+      POSTGRES_USER: ${POSTGRES_USER:-neuroflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the deployment environment}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-neuroflow_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in the deployment environment}
+      PGHOST: postgres
+      PGPORT: 5432
+    volumes:
+      - ../backend/db/ensure-app-role.sh:/opt/neuroflow/ensure-app-role.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  api:
+    image: neuroflow-api:task15-prod
+    build:
+      # The repository root is required because backend imports sibling
+      # pipelines/ and evaluation/ packages at runtime.
+      context: ..
+      dockerfile: backend/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    # Each Uvicorn child imports the ML stack. Keep one process per 1 GiB
+    # replica; horizontal Compose replicas provide API concurrency without
+    # multiplying per-container memory use.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    environment:
+      APP_ENV: production
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-neuroflow}
+      POSTGRES_USER: ${POSTGRES_APP_USER:-neuroflow_app}
+      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in the deployment environment}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in the deployment environment}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4317}
+      NEUROFLOW_JWT_SECRET: ${NEUROFLOW_JWT_SECRET:?Set NEUROFLOW_JWT_SECRET in the deployment environment}
+      NEUROFLOW_AUTH_CLIENTS: ${NEUROFLOW_AUTH_CLIENTS:?Set NEUROFLOW_AUTH_CLIENTS in the deployment environment}
+      OBSERVABILITY_SERVICE_TOKEN: ${OBSERVABILITY_SERVICE_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      HF_HOME: /tmp/huggingface
+      TRANSFORMERS_CACHE: /tmp/huggingface
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    expose: ["8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      db-setup:
+        condition: service_completed_successfully
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+    networks: [backend]
+
+  worker:
+    image: neuroflow-api:task15-prod
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    command: ["python", "-m", "worker"]
+    healthcheck:
+      # The ARQ worker has no HTTP listener; check that its main process lives.
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    environment:
+      APP_ENV: production
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-neuroflow}
+      POSTGRES_USER: ${POSTGRES_APP_USER:-neuroflow_app}
+      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in the deployment environment}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in the deployment environment}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4317}
+      NEUROFLOW_API_URL: http://api:8000
+      NEUROFLOW_JWT_SECRET: ${NEUROFLOW_JWT_SECRET:?Set NEUROFLOW_JWT_SECRET in the deployment environment}
+      NEUROFLOW_AUTH_CLIENTS: ${NEUROFLOW_AUTH_CLIENTS:?Set NEUROFLOW_AUTH_CLIENTS in the deployment environment}
+      OBSERVABILITY_SERVICE_TOKEN: ${OBSERVABILITY_SERVICE_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      NEUROFLOW_WORKER_CLIENT_ID: ${NEUROFLOW_WORKER_CLIENT_ID:-}
+      NEUROFLOW_WORKER_CLIENT_SECRET: ${NEUROFLOW_WORKER_CLIENT_SECRET:-}
+      HF_HOME: /tmp/huggingface
+      TRANSFORMERS_CACHE: /tmp/huggingface
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    expose: ["8001"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      db-setup:
+        condition: service_completed_successfully
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2.0"
+    networks: [backend]
+
+  nginx:
+    image: neuroflow-frontend:latest
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      target: runtime
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ${TLS_CERT_DIR:-./certs}:/etc/nginx/certs:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,size=64m
+      - /var/run:rw,noexec,nosuid,size=16m
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    networks: [backend]
+
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_artifacts:
+
+networks:
+  backend:
+    driver: bridge

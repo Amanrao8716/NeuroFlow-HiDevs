@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-11-10T16:31:57.209076+00:00",
+  "status": "failed",
+  "sample_count": 30,
+  "metric_weights": {
+    "faithfulness": 0.35,
+    "answer_relevance": 0.3,
+    "context_precision": 0.2,
+    "context_recall": 0.15
+  },
+  "error": "No LLM judge client or provider available to perform real calibration.",
+  "provenance": {
+    "dataset_path": "C:\\Users\\amanr\\Downloads\\NeuroFlow-HiDevs\\evaluation\\calibration\\annotated_set.json",
+    "evaluator": "None",
+    "executed_live_evaluation": false
+  },
+  "faithfulness_pearson_correlation": null,
+  "overall_score_pearson_correlation": null,
+  "is_calibrated": false
+}

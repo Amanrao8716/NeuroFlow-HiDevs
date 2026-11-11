@@ -18,6 +18,7 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: backend/requirements.txt
+
       - name: Install project and lint dependencies
         run: python -m pip install -r backend/requirements.txt ruff mypy
       - name: Ruff
